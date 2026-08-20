@@ -122,6 +122,10 @@ impl<W: std::io::Write + std::io::Seek> FstBodyWriter<W> {
 
     /// flushes all value change data to disk
     pub fn flush(&mut self) -> Result<()> {
+        if self.buffer.is_empty() {
+            // writing a section with an empty time table would be invalid
+            return Ok(());
+        }
         self.buffer.flush(&mut self.out)?;
         self.finish_info.num_value_change_sections += 1;
         Ok(())
@@ -134,10 +138,20 @@ impl<W: std::io::Write + std::io::Seek> FstBodyWriter<W> {
 
     pub fn finish(mut self) -> Result<()> {
         // write value change section
-        let end_time = self.buffer.flush(&mut self.out)?;
+        let end_time = if self.buffer.is_initial_time() {
+            // the time never advanced, so we mock up a single time step and also flush any values
+            // that were written (match fstapi.c)
+            self.buffer.mock_initial_time_step()?;
+            self.finish_info.num_value_change_sections += 1;
+            self.buffer.flush(&mut self.out)?
+        } else if self.buffer.is_empty() {
+            self.buffer.end_time()
+        } else {
+            self.finish_info.num_value_change_sections += 1;
+            self.buffer.flush(&mut self.out)?
+        };
 
         // update info
-        self.finish_info.num_value_change_sections += 1;
         self.finish_info.end_time = end_time;
         update_header(&mut self.out, &self.finish_info)?;
 

@@ -44,6 +44,116 @@ fn write_read_empty() {
     drop(wellen::simple::read(filename).unwrap());
 }
 
+/// The reference implementation mocks up a time zero step if the time never advances,
+/// instead of dropping the values (see `fstWriterClose` in `fstapi.c`).
+#[test]
+fn write_read_no_time_change() {
+    let filename = "tests/no_time_change.fst";
+    let info = FstInfo {
+        start_time: 0,
+        timescale_exponent: 0,
+        version: "test 0.2.3".to_string(),
+        date: "2034-10-10".to_string(),
+        file_type: FstFileType::Verilog,
+    };
+    let mut writer = open_fst(filename, &info).unwrap();
+    let a = writer
+        .var(
+            "a",
+            FstSignalType::bit_vec(1),
+            FstVarType::Logic,
+            FstVarDirection::Implicit,
+            None,
+        )
+        .unwrap();
+    let b = writer
+        .var(
+            "b",
+            FstSignalType::bit_vec(16),
+            FstVarType::Port,
+            FstVarDirection::Input,
+            None,
+        )
+        .unwrap();
+    // c never receives a value and thus stays at its default
+    let _c = writer
+        .var(
+            "c",
+            FstSignalType::bit_vec(1),
+            FstVarType::Logic,
+            FstVarDirection::Implicit,
+            None,
+        )
+        .unwrap();
+
+    let mut writer = writer.finish().unwrap();
+    // values are provided, but the time never advances
+    writer.signal_change(a, b"1").unwrap();
+    writer.signal_change(b, b"1010101010101010").unwrap();
+    writer.finish().unwrap();
+
+    //// read
+    let mut wave = wellen::simple::read(filename).unwrap();
+    assert_eq!(wave.time_table(), [0]);
+
+    // a, b and c are the first three signals in the file
+    let refs = (0..3)
+        .map(|ii| SignalRef::from_index(ii).unwrap())
+        .collect::<Vec<_>>();
+    wave.load_signals(&refs);
+    let values = refs
+        .iter()
+        .map(|r| signal_values_to_string(wave.get_signal(*r).unwrap(), wave.time_table()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        values,
+        ["(0: 1)", "(0: 1010101010101010)", "(0: x)"],
+        "the values written before the first time change need to be preserved"
+    );
+}
+
+/// Calling `finish` right after a `flush` must not write out a second, redundant section.
+#[test]
+fn write_read_flush_then_finish() {
+    let filename = "tests/flush_then_finish.fst";
+    let info = FstInfo {
+        start_time: 0,
+        timescale_exponent: 0,
+        version: "test 0.2.3".to_string(),
+        date: "2034-10-10".to_string(),
+        file_type: FstFileType::Verilog,
+    };
+    let mut writer = open_fst(filename, &info).unwrap();
+    let a = writer
+        .var(
+            "a",
+            FstSignalType::bit_vec(1),
+            FstVarType::Logic,
+            FstVarDirection::Implicit,
+            None,
+        )
+        .unwrap();
+
+    let mut writer = writer.finish().unwrap();
+    writer.signal_change(a, b"0").unwrap();
+    writer.time_change(1).unwrap();
+    writer.signal_change(a, b"1").unwrap();
+    writer.flush().unwrap();
+    // no more value changes, and flushing again should be a no-op
+    writer.flush().unwrap();
+    writer.finish().unwrap();
+
+    //// read
+    let mut wave = wellen::simple::read(filename).unwrap();
+    assert_eq!(wave.time_table(), [0, 1]);
+    let a_ref = SignalRef::from_index(0).unwrap();
+    wave.load_signals(&[a_ref]);
+    assert_eq!(
+        signal_values_to_string(wave.get_signal(a_ref).unwrap(), wave.time_table()),
+        "(0: 0), (1: 1)"
+    );
+}
+
 #[test]
 fn write_read_simple() {
     let filename = "tests/simple.fst";

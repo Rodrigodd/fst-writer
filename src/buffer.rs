@@ -125,8 +125,7 @@ impl SignalBuffer {
         };
         let value = value_cow.as_ref();
         debug_assert_eq!(value.len(), len);
-        let first_time_step = self.time_table.is_empty();
-        if first_time_step && self.first_buffer {
+        if self.is_initial_time() {
             self.values[range].copy_from_slice(value);
         } else {
             if self.time_table.is_empty() {
@@ -155,6 +154,47 @@ impl SignalBuffer {
 
             // remember previous time-table index
             self.prev_time_table_index[signal_id.to_array_index()] = self.time_table_index;
+        }
+        Ok(())
+    }
+
+    /// Returns true if there is no timestamp to flush.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.time_table.is_empty()
+    }
+
+    /// Return true if no [`time_change`] was issue.
+    pub(crate) fn is_initial_time(&self) -> bool {
+        self.time_table.is_empty() && self.first_buffer
+    }
+
+    pub(crate) fn end_time(&self) -> u64 {
+        self.end_time
+    }
+
+    /// Mocks up a single time step at the current time, containing the values of all signals.
+    ///
+    /// This is used when the file is closed without the time ever advancing. We follow the
+    /// reference implementation which, in that case, emits "the changes as time zero ones"
+    /// (see `fstWriterClose` in `fstapi.c`), instead of dropping the values.
+    pub(crate) fn mock_initial_time_step(&mut self) -> Result<()> {
+        debug_assert!(self.time_table.is_empty(), "there already is a time step");
+
+        // like the first `time_change`, we capture the current values in the frame
+        self.frame = self.values.clone();
+        // the first time step is written relative to 0
+        write_time_chain_update(&mut self.time_table, 0, self.end_time)?;
+
+        // clone all values into the first time step, like the reference implementation does
+        for signal_idx in 0..self.signals.len() {
+            let info = &self.signals[signal_idx];
+            let range = info.offset as usize..(info.offset + info.len) as usize;
+            self.write_buf.clear();
+            match &self.values[range] {
+                [value] => write_one_bit_signal(&mut self.write_buf, 0, *value)?,
+                values => write_multi_bit_signal(&mut self.write_buf, 0, values)?,
+            }
+            self.value_changes.append(signal_idx, &self.write_buf, None);
         }
         Ok(())
     }
