@@ -59,7 +59,7 @@ fuzz_target!(|data: &[u8]| {
     let writerfile = outdir.path().join("fst-writer.fst");
     let mut writer = open_fst(&writerfile, &info).unwrap();
 
-    let vars = (0..(data[0] as usize).min(1))
+    let vars = (0..data[0] as usize)
         .map(|i| {
             let name = &format!("s{}", i);
             let width = 8;
@@ -96,7 +96,7 @@ fuzz_target!(|data: &[u8]| {
             break;
         };
 
-        timestamp += dt.min(1) as u64;
+        timestamp += dt as u64;
         let signal = vars[signal as usize % vars.len()];
         let value = format!("{:08b}", value);
 
