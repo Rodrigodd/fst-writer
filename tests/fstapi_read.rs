@@ -126,3 +126,100 @@ fn read_with_fstapi(filename: &str) -> (u64, u64, Vec<(u64, String)>) {
         .unwrap();
     (reader.start_time(), reader.end_time(), changes)
 }
+
+/// A history that leaves the section without any value change produces a file with no value change
+/// section at all, in both writers: the reference bails out of `fstWriterFlushContextPrivate` on
+/// `vchg_siz <= 1` (`fstapi.c:1259`) without ever finalizing the block. Neither file is usable —
+/// `fstReaderOpen` rejects a file whose `vc_section_count` is 0 (the `else` branch of the
+/// `rc && vc_section_count && maxhandle && ...` check in `fstapi.c`) — but they have to be
+/// *equally* unusable, which is what this pins.
+///
+/// Our file is the better formed of the two: the reference leaves its unfinalized section header
+/// behind as a zero-length `FST_BL_SKIP` block, which readers cannot even walk past, whereas we
+/// write nothing at all.
+#[test]
+fn fstapi_diff_no_value_changes() {
+    for (name, history) in [
+        // a value that only ever reaches the frame, and a first time change at 0 that makes
+        // readers skip that frame
+        (
+            "value_then_time_change",
+            &[Step::Value(b"1"), Step::Time(0)][..],
+        ),
+        // time changes without a single value
+        ("only_time_changes", &[Step::Time(0), Step::Time(5)][..]),
+    ] {
+        let fstapi_file = format!("tests/no_vc_{name}_fstapi.fst");
+        let our_file = format!("tests/no_vc_{name}.fst");
+        write_with_fstapi(&fstapi_file, history);
+        write_with_fst_writer(&our_file, history);
+
+        // `Reader::open` fails for both, and it has to fail the same way
+        let outcome = |f: &str| {
+            fstapi::Reader::open(f)
+                .map(|_| ())
+                .map_err(|e| format!("{e:?}"))
+        };
+        assert_eq!(
+            outcome(&our_file),
+            outcome(&fstapi_file),
+            "{name}: the reference reader must make the same thing of both files"
+        );
+    }
+}
+
+/// One call of the writer API, so the same history can be replayed into both writers.
+enum Step<'a> {
+    Time(u64),
+    Value(&'a [u8]),
+}
+
+fn write_with_fstapi(filename: &str, history: &[Step]) {
+    let mut writer = fstapi::Writer::create(filename, true)
+        .unwrap()
+        .timescale_from_str("1ns")
+        .unwrap();
+    let var = writer
+        .create_var(
+            fstapi::var_type::VCD_REG,
+            fstapi::var_dir::OUTPUT,
+            1,
+            "a",
+            None,
+        )
+        .unwrap();
+    for step in history {
+        match step {
+            Step::Time(time) => writer.emit_time_change(*time).unwrap(),
+            Step::Value(value) => writer.emit_value_change(var, value).unwrap(),
+        }
+    }
+}
+
+fn write_with_fst_writer(filename: &str, history: &[Step]) {
+    let info = FstInfo {
+        start_time: 0,
+        timescale_exponent: -9,
+        version: "test 0.2.3".to_string(),
+        date: "2034-10-10".to_string(),
+        file_type: FstFileType::Verilog,
+    };
+    let mut writer = open_fst(filename, &info).unwrap();
+    let var = writer
+        .var(
+            "a",
+            FstSignalType::bit_vec(1),
+            FstVarType::Logic,
+            FstVarDirection::Output,
+            None,
+        )
+        .unwrap();
+    let mut writer = writer.finish().unwrap();
+    for step in history {
+        match step {
+            Step::Time(time) => writer.time_change(*time).unwrap(),
+            Step::Value(value) => writer.signal_change(var, value).unwrap(),
+        }
+    }
+    writer.finish().unwrap();
+}

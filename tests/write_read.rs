@@ -265,9 +265,11 @@ fn write_read_first_time_change_at_zero() {
     );
 }
 
-/// Values written before a first time change at 0 used to get lost: they only end up in the frame,
-/// which readers skip when the first time step is at the start time of the section
-/// (`fst-reader` only reads the frame if `time_table[0] > start_time`).
+/// Values written before a first time change at 0 are lost, and that is what the reference does
+/// too: they only ever reach the frame (`fstWriterEmitValueChange` takes the `curval_mem`-only path
+/// while `is_initial_time`, `fstapi.c:2932-2935`), and readers skip the frame when the first time
+/// step is at the start time of the section (`fstapi.c:5066`; `fst-reader` only reads it if
+/// `time_table[0] > start_time`). A signal that never received a value has no data either.
 #[test]
 fn write_read_value_before_time_change_at_zero() {
     let filename = "tests/value_before_time_change_at_zero.fst";
@@ -324,20 +326,104 @@ fn write_read_value_before_time_change_at_zero() {
         .map(|ii| SignalRef::from_index(ii).unwrap())
         .collect::<Vec<_>>();
     wave.load_signals(&refs);
-    let values = refs
-        .iter()
-        .map(|r| signal_values_to_string(wave.get_signal(*r).unwrap(), wave.time_table()))
-        .collect::<Vec<_>>();
+    // only the change written after the first time step survives; the `1` written before it went
+    // into the skipped frame
     assert_eq!(
-        values,
-        [
-            "(0: 1), (5: 0)",
-            "(0: 1010101010101010)",
-            // like the frame would have, the mocked time step also carries the default values
-            "(0: x)"
-        ],
-        "the values written before the first time change need to be preserved"
+        signal_values_to_string(wave.get_signal(refs[0]).unwrap(), wave.time_table()),
+        "(5: 0)"
     );
+    for (r, name) in refs[1..].iter().zip(["b", "c"]) {
+        assert_eq!(
+            wave.get_signal(*r).unwrap().get_first_time_idx(),
+            None,
+            "{name} has no value change of its own, so it has no data"
+        );
+    }
+}
+
+/// A section that holds no value change at all is never written out: the reference bails out of
+/// `fstWriterFlushContextPrivate` on `vchg_siz <= 1` (`fstapi.c:1259`) before it re-tags the block,
+/// leaving the header tagged `FST_BL_SKIP`, which readers treat like EOF (`fstapi.c:4917`).
+/// Here the only value written lands in the frame, which is then skipped, so nothing is left.
+///
+/// A file with no value change section is barely usable — `fstReaderOpen` rejects it outright and
+/// wellen panics as soon as signals are loaded — but it is what the reference produces, see
+/// `fstapi_diff_no_value_changes` in `tests/fstapi_read.rs` and `repro/no-value-changes.fst`.
+#[test]
+fn write_read_value_then_time_change_at_zero_writes_no_section() {
+    let filename = "tests/value_then_time_change_at_zero.fst";
+    let info = FstInfo {
+        start_time: 0,
+        timescale_exponent: 0,
+        version: "test 0.2.3".to_string(),
+        date: "2034-10-10".to_string(),
+        file_type: FstFileType::Verilog,
+    };
+    let mut writer = open_fst(filename, &info).unwrap();
+    let a = writer
+        .var(
+            "a",
+            FstSignalType::bit_vec(1),
+            FstVarType::Logic,
+            FstVarDirection::Implicit,
+            None,
+        )
+        .unwrap();
+
+    let mut writer = writer.finish().unwrap();
+    writer.signal_change(a, b"1").unwrap();
+    writer.time_change(0).unwrap();
+    writer.finish().unwrap();
+
+    //// read
+    let wave = wellen::simple::read(filename).unwrap();
+    assert!(
+        wave.time_table().is_empty(),
+        "no value change section was written: {:?}",
+        wave.time_table()
+    );
+    // no `load_signals` here: wellen 0.13.12 panics on an empty time table
+    // (`wellen-0.13.12/src/fst.rs:69`), see `repro/no-value-changes.fst`
+}
+
+/// Time changes on their own do not make a section either (`fstapi.c:1259`, see above). The time
+/// steps are simply absent from the file, while the header still records the end time, like
+/// `fstWriterClose` writing out `curtime` (`fstapi.c:2099`).
+#[test]
+fn write_read_only_time_changes_writes_no_section() {
+    let filename = "tests/only_time_changes.fst";
+    let info = FstInfo {
+        start_time: 0,
+        timescale_exponent: 0,
+        version: "test 0.2.3".to_string(),
+        date: "2034-10-10".to_string(),
+        file_type: FstFileType::Verilog,
+    };
+    let mut writer = open_fst(filename, &info).unwrap();
+    let _a = writer
+        .var(
+            "a",
+            FstSignalType::bit_vec(1),
+            FstVarType::Logic,
+            FstVarDirection::Implicit,
+            None,
+        )
+        .unwrap();
+
+    let mut writer = writer.finish().unwrap();
+    writer.time_change(0).unwrap();
+    writer.time_change(5).unwrap();
+    writer.finish().unwrap();
+
+    //// read
+    let wave = wellen::simple::read(filename).unwrap();
+    assert!(
+        wave.time_table().is_empty(),
+        "no value change section was written: {:?}",
+        wave.time_table()
+    );
+    // no `load_signals` here: wellen 0.13.12 panics on an empty time table
+    // (`wellen-0.13.12/src/fst.rs:69`), see `repro/no-value-changes.fst`
 }
 
 #[test]

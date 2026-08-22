@@ -123,8 +123,9 @@ impl<W: std::io::Write + std::io::Seek> FstBodyWriter<W> {
 
     /// flushes all value change data to disk
     pub fn flush(&mut self) -> Result<()> {
-        if self.buffer.is_empty() {
-            // writing a section with an empty time table would be invalid
+        if !self.buffer.has_value_changes() {
+            // the reference never writes out a section without any value change; the section
+            // stays open instead, so later value changes join it (`fstapi.c:1259`)
             return Ok(());
         }
         self.buffer.flush(&mut self.out)?;
@@ -138,18 +139,18 @@ impl<W: std::io::Write + std::io::Seek> FstBodyWriter<W> {
     }
 
     pub fn finish(mut self) -> Result<()> {
-        // write value change section
-        let end_time = if self.buffer.is_initial_time() {
-            // the time never advanced, so we mock up a single time step and also flush any values
-            // that were written (match fstapi.c)
+        if self.buffer.is_initial_time() {
+            // "simulation time never advanced so mock up the changes as time zero ones"
+            // (`fstWriterClose`, `fstapi.c:1870-1883`)
             self.buffer.mock_initial_time_step()?;
+        }
+
+        // write the value change section, unless it would hold no value change at all
+        let end_time = if self.buffer.has_value_changes() {
             self.finish_info.num_value_change_sections += 1;
             self.buffer.flush(&mut self.out)?
-        } else if self.buffer.is_empty() {
-            self.buffer.end_time()
         } else {
-            self.finish_info.num_value_change_sections += 1;
-            self.buffer.flush(&mut self.out)?
+            self.buffer.end_time()
         };
 
         // update info
