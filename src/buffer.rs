@@ -86,25 +86,18 @@ impl SignalBuffer {
 
     pub(crate) fn time_change(&mut self, new_time: u64) -> Result<()> {
         if self.is_initial_time() {
-            // if no value was written yet, we start at new_time, otherwise we start at 0
-            if self.signal_change_emmited {
-                self.start_time = 0;
-                self.first_time = 0;
-                self.start_time_step(new_time)?;
-
-                // Readers do not read back the frame when the first time step is at the start time
-                // of the section (`fstapi.c:5066`), thus any value written before this first time
-                // change would be lost. We write all values out as value changes instead, which
-                // makes the section behave exactly like one whose frame is read.
-                if new_time == 0 {
-                    self.clone_all_values()?;
-                }
+            // `firsttime = vc_emitted ? 0 : tim` (`fstWriterEmitTimeChange`, `fstapi.c:3124`).
+            // The values written so far stay in the frame only, just like in the reference
+            // (`fstapi.c:2932-2935`). Readers skip that frame when the first time step is at the
+            // start time of the section (`fstapi.c:5066`), so those values are lost — the
+            // reference loses them in exactly the same way.
+            self.start_time = if self.signal_change_emmited {
+                0
             } else {
-                self.start_time = new_time;
-                self.first_time = self.start_time;
-                self.start_time_step(new_time)?;
-            }
-
+                new_time
+            };
+            self.first_time = self.start_time;
+            self.start_time_step(new_time)?;
             return Ok(());
         }
 
@@ -198,9 +191,12 @@ impl SignalBuffer {
         Ok(())
     }
 
-    /// Returns true if there is no timestamp to flush.
-    pub(crate) fn is_empty(&self) -> bool {
-        self.time_table.is_empty()
+    /// Returns true if the current section holds at least one value change. The reference never
+    /// finalizes a section without one: `fstWriterFlushContextPrivate` returns early on
+    /// `vchg_siz <= 1` (`fstapi.c:1259`), leaving the section open and its header tagged
+    /// `FST_BL_SKIP`, which readers treat like EOF (`fstapi.c:4917`).
+    pub(crate) fn has_value_changes(&self) -> bool {
+        !self.value_changes.is_empty()
     }
 
     /// Return true if no [`time_change`] was issue.
@@ -212,19 +208,19 @@ impl SignalBuffer {
         self.end_time
     }
 
-    /// Mocks up a single time step at the current time, containing the values of all signals.
+    /// Mocks up a single time step at zero, containing the values of all signals.
     ///
-    /// This is used when the file is closed without the time ever advancing. We follow the
-    /// reference implementation which, in that case, emits "the changes as time zero ones"
-    /// (see `fstWriterClose` in `fstapi.c`), instead of dropping the values.
+    /// Used when the file is closed without the time ever advancing, where the reference
+    /// "mock[s] up the changes as time zero ones": one time change followed by a clone of every
+    /// handle's value (`fstWriterClose`, `fstapi.c:1870-1883`).
     pub(crate) fn mock_initial_time_step(&mut self) -> Result<()> {
         debug_assert!(self.is_initial_time(), "the time already advanced");
-        self.signal_change_emmited = true;
-        self.time_change(self.end_time)
+        self.time_change(0)?;
+        self.clone_all_values()
     }
 
     /// Write down the current value of every signal as a value change in the current time step.
-    pub fn clone_all_values(&mut self) -> Result<()> {
+    fn clone_all_values(&mut self) -> Result<()> {
         for signal_idx in 0..self.signals.len() {
             self.append_value_change(signal_idx)?;
         }
@@ -372,6 +368,10 @@ impl ValueLists for SingleVecLists {
 }
 
 impl SingleVecLists {
+    fn is_empty(&self) -> bool {
+        self.data.is_empty()
+    }
+
     #[inline]
     fn read_back_pointer(&self, start: usize) -> u32 {
         u32::from_le_bytes(self.data[start..start + 4].as_ref().try_into().unwrap())
