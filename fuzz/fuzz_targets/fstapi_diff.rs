@@ -73,7 +73,7 @@ fuzz_target!(|data: &[u8]| {
         let signal = vars[signal as usize % vars.len()];
         let value = format!("{:08b}", value);
 
-        println!("{} {} {}", timestamp, signal.0, value);
+        // println!("{} {} {}", timestamp, signal.0, value);
 
         fstapi.emit_time_change(timestamp).unwrap();
         fstapi
@@ -88,7 +88,7 @@ fuzz_target!(|data: &[u8]| {
 
     drop(fstapi);
 
-    println!("Files: {:?} {:?}", fstfile, writerfile);
+    // println!("Files: {:?} {:?}", fstfile, writerfile);
 
     // read
     let fstwave = wellen::simple::read(fstfile).unwrap();

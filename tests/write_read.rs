@@ -154,6 +154,192 @@ fn write_read_flush_then_finish() {
     );
 }
 
+/// If no value is written before the first time change, the first value change section starts at
+/// that first time (`firsttime = vc_emitted ? 0 : tim` in `fstWriterEmitTimeChange`, `fstapi.c`).
+/// Otherwise readers re-create a time 0 entry from the section start time (`fst-reader`:
+/// `if is_first_section && time_chain[0] > start_time`), which would show up as an extra all-`x`
+/// sample that a file written by `fstapi.c` does not have.
+#[test]
+fn write_read_first_time_change_not_zero() {
+    let filename = "tests/first_time_change_not_zero.fst";
+    let info = FstInfo {
+        start_time: 0,
+        timescale_exponent: 0,
+        version: "test 0.2.3".to_string(),
+        date: "2034-10-10".to_string(),
+        file_type: FstFileType::Verilog,
+    };
+    let mut writer = open_fst(filename, &info).unwrap();
+    let a = writer
+        .var(
+            "a",
+            FstSignalType::bit_vec(1),
+            FstVarType::Logic,
+            FstVarDirection::Implicit,
+            None,
+        )
+        .unwrap();
+
+    let mut writer = writer.finish().unwrap();
+    // no values before the first time change, and the first time change is not at 0
+    writer.time_change(10).unwrap();
+    writer.signal_change(a, b"1").unwrap();
+    writer.time_change(20).unwrap();
+    writer.signal_change(a, b"0").unwrap();
+    writer.finish().unwrap();
+
+    //// read
+    let mut wave = wellen::simple::read(filename).unwrap();
+    let a_ref = SignalRef::from_index(0).unwrap();
+    wave.load_signals(&[a_ref]);
+    let values = signal_values_to_string(wave.get_signal(a_ref).unwrap(), wave.time_table());
+
+    // this is what a file written by `fstapi.c` looks like
+    assert_eq!(
+        wave.time_table(),
+        [10, 20],
+        "no time 0 entry expected, values are: {values}"
+    );
+    assert_eq!(values, "(10: 1), (20: 0)");
+}
+
+/// A first time change at 0 is recorded in the time table, just like in `fstapi.c`, which means
+/// that the frame is not read back by readers (`fst-reader` only reads it if the first time table
+/// entry is greater than the start time of the section). Signals without a value change thus have
+/// no data at all, which is also what a file written by `fstapi.c` looks like.
+#[test]
+fn write_read_first_time_change_at_zero() {
+    let filename = "tests/first_time_change_at_zero.fst";
+    let info = FstInfo {
+        start_time: 0,
+        timescale_exponent: 0,
+        version: "test 0.2.3".to_string(),
+        date: "2034-10-10".to_string(),
+        file_type: FstFileType::Verilog,
+    };
+    let mut writer = open_fst(filename, &info).unwrap();
+    let a = writer
+        .var(
+            "a",
+            FstSignalType::bit_vec(1),
+            FstVarType::Logic,
+            FstVarDirection::Implicit,
+            None,
+        )
+        .unwrap();
+    // b never receives a value
+    let _b = writer
+        .var(
+            "b",
+            FstSignalType::bit_vec(1),
+            FstVarType::Logic,
+            FstVarDirection::Implicit,
+            None,
+        )
+        .unwrap();
+
+    let mut writer = writer.finish().unwrap();
+    // the first time change is at 0, and no value is written before it
+    writer.time_change(0).unwrap();
+    writer.signal_change(a, b"1").unwrap();
+    writer.time_change(1).unwrap();
+    writer.signal_change(a, b"0").unwrap();
+    writer.finish().unwrap();
+
+    //// read
+    let mut wave = wellen::simple::read(filename).unwrap();
+    assert_eq!(wave.time_table(), [0, 1]);
+    let (a_ref, b_ref) = (
+        SignalRef::from_index(0).unwrap(),
+        SignalRef::from_index(1).unwrap(),
+    );
+    wave.load_signals(&[a_ref, b_ref]);
+    assert_eq!(
+        signal_values_to_string(wave.get_signal(a_ref).unwrap(), wave.time_table()),
+        "(0: 1), (1: 0)"
+    );
+    assert_eq!(
+        wave.get_signal(b_ref).unwrap().get_first_time_idx(),
+        None,
+        "a signal without any value change has no data"
+    );
+}
+
+/// Values written before a first time change at 0 used to get lost: they only end up in the frame,
+/// which readers skip when the first time step is at the start time of the section
+/// (`fst-reader` only reads the frame if `time_table[0] > start_time`).
+#[test]
+fn write_read_value_before_time_change_at_zero() {
+    let filename = "tests/value_before_time_change_at_zero.fst";
+    let info = FstInfo {
+        start_time: 0,
+        timescale_exponent: 0,
+        version: "test 0.2.3".to_string(),
+        date: "2034-10-10".to_string(),
+        file_type: FstFileType::Verilog,
+    };
+    let mut writer = open_fst(filename, &info).unwrap();
+    let a = writer
+        .var(
+            "a",
+            FstSignalType::bit_vec(1),
+            FstVarType::Logic,
+            FstVarDirection::Implicit,
+            None,
+        )
+        .unwrap();
+    let b = writer
+        .var(
+            "b",
+            FstSignalType::bit_vec(16),
+            FstVarType::Port,
+            FstVarDirection::Input,
+            None,
+        )
+        .unwrap();
+    // c never receives a value
+    let _c = writer
+        .var(
+            "c",
+            FstSignalType::bit_vec(1),
+            FstVarType::Logic,
+            FstVarDirection::Implicit,
+            None,
+        )
+        .unwrap();
+
+    let mut writer = writer.finish().unwrap();
+    // initial values, followed by a first time change at 0
+    writer.signal_change(a, b"1").unwrap();
+    writer.signal_change(b, b"1010101010101010").unwrap();
+    writer.time_change(0).unwrap();
+    writer.time_change(5).unwrap();
+    writer.signal_change(a, b"0").unwrap();
+    writer.finish().unwrap();
+
+    //// read
+    let mut wave = wellen::simple::read(filename).unwrap();
+    assert_eq!(wave.time_table(), [0, 5]);
+    let refs = (0..3)
+        .map(|ii| SignalRef::from_index(ii).unwrap())
+        .collect::<Vec<_>>();
+    wave.load_signals(&refs);
+    let values = refs
+        .iter()
+        .map(|r| signal_values_to_string(wave.get_signal(*r).unwrap(), wave.time_table()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        values,
+        [
+            "(0: 1), (5: 0)",
+            "(0: 1010101010101010)",
+            // like the frame would have, the mocked time step also carries the default values
+            "(0: x)"
+        ],
+        "the values written before the first time change need to be preserved"
+    );
+}
+
 #[test]
 fn write_read_simple() {
     let filename = "tests/simple.fst";

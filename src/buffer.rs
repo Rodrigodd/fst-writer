@@ -26,11 +26,16 @@ pub(crate) struct SignalBuffer {
     value_changes: SingleVecLists,
     /// contains the delta encoded and compressed timetable
     time_table: Vec<u8>,
+    /// the current number of time steps in [`Self::time_table`].
     time_table_index: u32,
     /// keep a vec allocation around for encoding signals
     write_buf: Vec<u8>,
     /// is this the first buffer for the file that we are writing?
     first_buffer: bool,
+    /// was a value written before the first time change?
+    signal_change_emmited: bool,
+    /// start time of the first value change section
+    first_time: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -74,32 +79,61 @@ impl SignalBuffer {
             time_table_index: 0,
             write_buf: vec![],
             first_buffer: true,
+            signal_change_emmited: false,
+            first_time: 0,
         })
     }
 
     pub(crate) fn time_change(&mut self, new_time: u64) -> Result<()> {
+        if self.is_initial_time() {
+            // if no value was written yet, we start at new_time, otherwise we start at 0
+            if self.signal_change_emmited {
+                self.start_time = 0;
+                self.first_time = 0;
+                self.start_time_step(new_time)?;
+
+                // Readers do not read back the frame when the first time step is at the start time
+                // of the section (`fstapi.c:5066`), thus any value written before this first time
+                // change would be lost. We write all values out as value changes instead, which
+                // makes the section behave exactly like one whose frame is read.
+                if new_time == 0 {
+                    self.clone_all_values()?;
+                }
+            } else {
+                self.start_time = new_time;
+                self.first_time = self.start_time;
+                self.start_time_step(new_time)?;
+            }
+
+            return Ok(());
+        }
+
         match new_time.cmp(&self.end_time) {
             Ordering::Less => Err(FstWriteError::TimeDecrease(self.end_time, new_time)),
             Ordering::Equal => Ok(()),
+            // the first step of a section is not captured in the time table index, but instead in
+            // the start_time
+            Ordering::Greater if self.time_table.is_empty() => self.start_time_step(new_time),
             Ordering::Greater => {
-                let first_time_step = self.time_table.is_empty();
-                if first_time_step {
-                    // at the end of the first step, we copy values over into the frame
-                    self.frame = self.values.clone();
-                } else {
-                    // the first step is not captured in the time table, but instead in the start_time
-                    self.time_table_index += 1;
-                }
-                debug_assert!(self.start_time <= self.end_time);
-
-                // in the first step, the time needs to be written relative to 0
-                let delta_to = if first_time_step { 0 } else { self.end_time };
+                self.time_table_index += 1;
                 // write timetable in compressed format
-                write_time_chain_update(&mut self.time_table, delta_to, new_time)?;
+                write_time_chain_update(&mut self.time_table, self.end_time, new_time)?;
                 self.end_time = new_time;
                 Ok(())
             }
         }
+    }
+
+    /// Starts the first time step of a value change section: the values collected so far become
+    /// the frame and the time is written relative to 0.
+    fn start_time_step(&mut self, new_time: u64) -> Result<()> {
+        debug_assert!(self.time_table.is_empty());
+        debug_assert!(self.start_time <= new_time);
+        // at the end of the first step, we copy values over into the frame
+        self.frame = self.values.clone();
+        write_time_chain_update(&mut self.time_table, 0, new_time)?;
+        self.end_time = new_time;
+        Ok(())
     }
 
     pub(crate) fn signal_change(&mut self, signal_id: FstSignalId, value: &[u8]) -> Result<()> {
@@ -127,9 +161,9 @@ impl SignalBuffer {
         debug_assert_eq!(value.len(), len);
         if self.is_initial_time() {
             self.values[range].copy_from_slice(value);
+            self.signal_change_emmited = true;
         } else {
             if self.time_table.is_empty() {
-                // write_time_chain_update(&mut self.time_table, 0, self.end_time)?;
                 todo!("Currently we only support flushing right before a new time step.")
             }
 
@@ -139,22 +173,28 @@ impl SignalBuffer {
             }
             self.values[range].copy_from_slice(value);
             // write down value change
-            let time_table_idx_delta = (self.time_table_index
-                - self.prev_time_table_index[signal_id.to_array_index()])
-                as u64;
-            self.write_buf.clear();
-            match value {
-                [value] => write_one_bit_signal(&mut self.write_buf, time_table_idx_delta, *value)?,
-                values => {
-                    write_multi_bit_signal(&mut self.write_buf, time_table_idx_delta, values)?
-                }
-            }
-            self.value_changes
-                .append(signal_id.to_array_index(), &self.write_buf, None);
-
-            // remember previous time-table index
-            self.prev_time_table_index[signal_id.to_array_index()] = self.time_table_index;
+            self.append_value_change(signal_id.to_array_index())?;
         }
+        Ok(())
+    }
+
+    /// Writes down a value change for the current value of a signal in the current time step.
+    fn append_value_change(&mut self, signal_idx: usize) -> Result<()> {
+        let (offset, len) = {
+            let info = &self.signals[signal_idx];
+            (info.offset as usize, info.len as usize)
+        };
+        let time_table_idx_delta =
+            (self.time_table_index - self.prev_time_table_index[signal_idx]) as u64;
+        self.write_buf.clear();
+        match &self.values[offset..offset + len] {
+            [value] => write_one_bit_signal(&mut self.write_buf, time_table_idx_delta, *value)?,
+            values => write_multi_bit_signal(&mut self.write_buf, time_table_idx_delta, values)?,
+        }
+        self.value_changes.append(signal_idx, &self.write_buf, None);
+
+        // remember previous time-table index
+        self.prev_time_table_index[signal_idx] = self.time_table_index;
         Ok(())
     }
 
@@ -178,25 +218,22 @@ impl SignalBuffer {
     /// reference implementation which, in that case, emits "the changes as time zero ones"
     /// (see `fstWriterClose` in `fstapi.c`), instead of dropping the values.
     pub(crate) fn mock_initial_time_step(&mut self) -> Result<()> {
-        debug_assert!(self.time_table.is_empty(), "there already is a time step");
+        debug_assert!(self.is_initial_time(), "the time already advanced");
+        self.signal_change_emmited = true;
+        self.time_change(self.end_time)
+    }
 
-        // like the first `time_change`, we capture the current values in the frame
-        self.frame = self.values.clone();
-        // the first time step is written relative to 0
-        write_time_chain_update(&mut self.time_table, 0, self.end_time)?;
-
-        // clone all values into the first time step, like the reference implementation does
+    /// Write down the current value of every signal as a value change in the current time step.
+    pub fn clone_all_values(&mut self) -> Result<()> {
         for signal_idx in 0..self.signals.len() {
-            let info = &self.signals[signal_idx];
-            let range = info.offset as usize..(info.offset + info.len) as usize;
-            self.write_buf.clear();
-            match &self.values[range] {
-                [value] => write_one_bit_signal(&mut self.write_buf, 0, *value)?,
-                values => write_multi_bit_signal(&mut self.write_buf, 0, values)?,
-            }
-            self.value_changes.append(signal_idx, &self.write_buf, None);
+            self.append_value_change(signal_idx)?;
         }
         Ok(())
+    }
+
+    /// Start time of the first value change section (`firsttime` in `fstapi.c`).
+    pub(crate) fn first_time(&self) -> u64 {
+        self.first_time
     }
 
     fn num_time_table_entries(&self) -> u64 {
