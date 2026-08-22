@@ -90,7 +90,8 @@ impl<W: std::io::Write + std::io::Seek> FstHeaderWriter<W> {
         write_geometry(&mut self.out, &self.signals)?;
         let buffer = SignalBuffer::new(&self.signals)?;
         let finish_info = HeaderFinishInfo {
-            end_time: 0, // currently unknown
+            start_time: 0, // currently unknown
+            end_time: 0,   // currently unknown
             scope_count: self.scope_count,
             var_count: self.var_count,
             num_signals: self.signals.len() as u64,
@@ -152,6 +153,7 @@ impl<W: std::io::Write + std::io::Seek> FstBodyWriter<W> {
         };
 
         // update info
+        self.finish_info.start_time = self.buffer.first_time();
         self.finish_info.end_time = end_time;
         update_header(&mut self.out, &self.finish_info)?;
 
