@@ -160,10 +160,15 @@ impl SignalBuffer {
                 todo!("Currently we only support flushing right before a new time step.")
             }
 
-            // check to see if there actually was a change
-            if &self.values[range.clone()] == value {
-                return Ok(());
-            }
+            // Duplicate suppression, disabled: the reference only removes duplicate value
+            // changes under `FST_REMOVE_DUPLICATE_VC` (`fstapi.c:2868-2924`), which is not defined
+            // in any build we test against, so suppressing here drops value changes that the
+            // reference keeps. Combined with skipping sections that hold no value change
+            // (`fstapi.c:1259`) it also loses the time steps of such a section. Kept for when we
+            // want glitch removal back.
+            // if &self.values[range.clone()] == value {
+            //     return Ok(());
+            // }
             self.values[range].copy_from_slice(value);
             // write down value change
             self.append_value_change(signal_id.to_array_index())?;
