@@ -91,10 +91,27 @@ fuzz_target!(|data: &[u8]| {
     // fstapi.emit_time_change(0).unwrap();
     // writer.time_change(0).unwrap();
 
-    for chunk in data[1..].chunks(3) {
-        let &[dt, signal, value] = chunk else {
+    for chunk in data[1..].chunks(4) {
+        let &[flush, dt, signal, value] = chunk else {
             break;
         };
+
+        // Flush on odd `flush` bytes, i.e. roughly every other step, and only right before a time
+        // step that actually advances. `signal_change` after a flush that is not followed by a new
+        // time step hits a `todo!()` in the writer ("Currently we only support flushing right
+        // before a new time step", `src/buffer.rs`), which this target would otherwise spend all
+        // its time rediscovering.
+        //
+        // The reference only queues the flush (`fstWriterFlushContext` sets
+        // `flush_context_pending`, and only once `tchn_idx > 1`, `fstapi.c:1835`) and acts on it at
+        // the next time change, while our `flush` writes the section out right away. The two
+        // therefore cut sections at different points, which the comparison below tolerates: the
+        // time table is the concatenation of every section's table, so it does not depend on where
+        // the boundaries fall.
+        if flush % 2 != 0 && dt > 0 {
+            fstapi.flush();
+            writer.flush().unwrap();
+        }
 
         timestamp += dt as u64;
         let signal = vars[signal as usize % vars.len()];
