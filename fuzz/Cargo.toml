@@ -8,10 +8,10 @@ edition = "2021"
 cargo-fuzz = true
 
 [dependencies]
-fstapi = "0.0.2"
+fst-reader = "0.17"
+fstapi = "0.0.3"
 libfuzzer-sys = "0.4"
 tempfile = "3.14.0"
-wellen = "0.13.6"
 
 [dependencies.fst-writer]
 path = ".."

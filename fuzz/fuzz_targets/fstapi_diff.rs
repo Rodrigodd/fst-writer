@@ -1,10 +1,37 @@
 #![no_main]
 
+use fst_reader::{FstHierarchyEntry, FstReader, ReaderError};
 use fst_writer::{open_fst, FstFileType, FstInfo, FstSignalType, FstVarDirection, FstVarType};
 use fstapi::{var_dir, var_type, Writer};
 use libfuzzer_sys::fuzz_target;
+use std::io::BufReader;
+use std::path::Path;
 use tempfile::tempdir;
-use wellen::GetItem;
+
+/// Everything we compare between the two files, as parsed by `fst-reader`.
+#[derive(Debug, PartialEq, Eq)]
+struct Parsed {
+    time_table: Vec<u64>,
+    vars: Vec<String>,
+}
+
+fn parse(path: &Path) -> Result<Parsed, ReaderError> {
+    let input = BufReader::new(std::fs::File::open(path).unwrap());
+    let mut reader = FstReader::open_and_read_time_table(input)?;
+
+    // Sometimes the time tables differ in how the times are being duplicated.
+    let mut time_table = reader.get_time_table().unwrap_or_default().to_vec();
+    time_table.dedup();
+
+    let mut vars = vec![];
+    reader.read_hierarchy(|entry| {
+        if let FstHierarchyEntry::Var { name, .. } = entry {
+            vars.push(name);
+        }
+    })?;
+
+    Ok(Parsed { time_table, vars })
+}
 
 fuzz_target!(|data: &[u8]| {
     if data.len() < 8 {
@@ -61,8 +88,8 @@ fuzz_target!(|data: &[u8]| {
 
     let mut timestamp: u64 = 0;
 
-    fstapi.emit_time_change(0).unwrap();
-    writer.time_change(0).unwrap();
+    // fstapi.emit_time_change(0).unwrap();
+    // writer.time_change(0).unwrap();
 
     for chunk in data[1..].chunks(3) {
         let &[dt, signal, value] = chunk else {
@@ -91,29 +118,12 @@ fuzz_target!(|data: &[u8]| {
     // println!("Files: {:?} {:?}", fstfile, writerfile);
 
     // read
-    let fstwave = wellen::simple::read(fstfile).unwrap();
-    let writerwave = wellen::simple::read(writerfile).unwrap();
 
-    // Some times the timetable differ in how the times are being duplicated.
-    fn dedup<T: Clone + PartialEq>(x: &[T]) -> Vec<T> {
-        let mut x = x.to_vec();
-        x.dedup();
-        x
-    }
-
-    assert_eq!(dedup(fstwave.time_table()), dedup(writerwave.time_table()));
-    let vars = |wave: &wellen::simple::Waveform| {
-        let h = wave.hierarchy();
-        h.vars()
-            .map(|r| h.get(r))
-            .map(|v| v.full_name(h))
-            .collect::<Vec<_>>()
+    // Ignore cases where it fail even in the reference writer
+    let Ok(reference) = parse(&fstfile) else {
+        return;
     };
+    let ours = parse(&writerfile).unwrap();
 
-    for (fstvar, writervar) in vars(&fstwave)
-        .into_iter()
-        .zip(vars(&writerwave).into_iter())
-    {
-        assert_eq!(fstvar, writervar);
-    }
+    assert_eq!(reference, ours);
 });
