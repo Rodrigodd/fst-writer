@@ -426,6 +426,56 @@ fn write_read_only_time_changes_writes_no_section() {
     // (`wellen-0.13.12/src/fst.rs:69`), see `repro/no-value-changes.fst`
 }
 
+/// A time table whose zlib encoding comes out exactly as long as the input must be stored raw.
+/// Readers use `uncompressed_length == compressed_length` as the signal that the block is stored
+/// raw (`fst-reader` 0.10.2, `src/io.rs:317`), so writing the zlib stream while recording equal
+/// lengths makes them decode deflate bytes as varint time deltas. The reference only uses the
+/// compressed form when it is strictly smaller (`fstapi.c:1669`).
+///
+/// Eleven time steps one tick apart is the smallest history that hits it: the time table is eleven
+/// `0x01` deltas, and zlib turns those into exactly eleven bytes. See
+/// `docs/time-table-equal-compressed-length.md`.
+#[test]
+fn write_read_time_table_equal_compressed_length() {
+    let filename = "tests/time_table_equal_compressed_length.fst";
+    let info = FstInfo {
+        start_time: 0,
+        timescale_exponent: 0,
+        version: "test 0.2.3".to_string(),
+        date: "2034-10-10".to_string(),
+        file_type: FstFileType::Verilog,
+    };
+    let mut writer = open_fst(filename, &info).unwrap();
+    let a = writer
+        .var(
+            "a",
+            FstSignalType::bit_vec(1),
+            FstVarType::Logic,
+            FstVarDirection::Implicit,
+            None,
+        )
+        .unwrap();
+
+    let mut writer = writer.finish().unwrap();
+    for time in 1..=11u64 {
+        writer.time_change(time).unwrap();
+        writer
+            .signal_change(a, if time % 2 == 0 { b"0" } else { b"1" })
+            .unwrap();
+    }
+    writer.finish().unwrap();
+
+    //// read
+    let mut wave = wellen::simple::read(filename).unwrap();
+    assert_eq!(wave.time_table(), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+    let a_ref = SignalRef::from_index(0).unwrap();
+    wave.load_signals(&[a_ref]);
+    assert_eq!(
+        signal_values_to_string(wave.get_signal(a_ref).unwrap(), wave.time_table()),
+        "(1: 1), (2: 0), (3: 1), (4: 0), (5: 1), (6: 0), (7: 1), (8: 0), (9: 1), (10: 0), (11: 1)"
+    );
+}
+
 #[test]
 fn write_read_simple() {
     let filename = "tests/simple.fst";

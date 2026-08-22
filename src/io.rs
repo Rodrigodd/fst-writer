@@ -531,8 +531,11 @@ fn write_time_table(
     // zlib compress
     let compressed = miniz_oxide::deflate::compress_to_vec_zlib(time_table, ZLIB_LEVEL);
 
-    // is compression worth it?
-    if compressed.len() > time_table.len() {
+    // is compression worth it? Only strictly smaller counts: readers take
+    // `uncompressed_length == compressed_length` to mean the block is stored raw, so an equally
+    // long zlib stream would be decoded as varint time deltas. The reference uses the same
+    // strict-improvement rule (`fstapi.c:1669`).
+    if compressed.len() >= time_table.len() {
         // it is more space efficient to stick with the uncompressed version
         output.write_all(time_table)?;
         write_u64(output, time_table.len() as u64)?;
