@@ -73,8 +73,10 @@ fn main() {
                 SignalValueRef::String(_value) => {
                     todo!("deal with var len string");
                 }
-                SignalValueRef::Real(_value) => {
-                    todo!("deal with real value: {value}");
+                SignalValueRef::Real(value) => {
+                    let bytes = value.to_le_bytes();
+                    out.signal_change(fst_id, &bytes)
+                        .expect("failed to write value change");
                 }
             }
 
@@ -235,29 +237,29 @@ fn write_scope<W: std::io::Write + std::io::Seek>(
     let component = scope.component(hier).unwrap_or("");
     let tpe = match scope.scope_type() {
         ScopeType::Module => FstScopeType::Module,
-        ScopeType::Task => todo!(),
-        ScopeType::Function => todo!(),
-        ScopeType::Begin => todo!(),
-        ScopeType::Fork => todo!(),
-        ScopeType::Generate => todo!(),
-        ScopeType::Struct => todo!(),
-        ScopeType::Union => todo!(),
-        ScopeType::Class => todo!(),
-        ScopeType::Interface => todo!(),
-        ScopeType::Package => todo!(),
-        ScopeType::Program => todo!(),
-        ScopeType::VhdlArchitecture => todo!(),
-        ScopeType::VhdlProcedure => todo!(),
-        ScopeType::VhdlFunction => todo!(),
-        ScopeType::VhdlRecord => todo!(),
-        ScopeType::VhdlProcess => todo!(),
-        ScopeType::VhdlBlock => todo!(),
-        ScopeType::VhdlForGenerate => todo!(),
-        ScopeType::VhdlIfGenerate => todo!(),
-        ScopeType::VhdlGenerate => todo!(),
-        ScopeType::VhdlPackage => todo!(),
-        ScopeType::GhwGeneric => todo!(),
-        ScopeType::VhdlArray => todo!(),
+        ScopeType::Task => FstScopeType::Task,
+        ScopeType::Function => FstScopeType::Function,
+        ScopeType::Begin => FstScopeType::Begin,
+        ScopeType::Fork => FstScopeType::Fork,
+        ScopeType::Generate => FstScopeType::Generate,
+        ScopeType::Struct => FstScopeType::Struct,
+        ScopeType::Union => FstScopeType::Union,
+        ScopeType::Class => FstScopeType::Class,
+        ScopeType::Interface => FstScopeType::Interface,
+        ScopeType::Package => FstScopeType::Package,
+        ScopeType::Program => FstScopeType::Program,
+        ScopeType::VhdlArchitecture => FstScopeType::VhdlArchitecture,
+        ScopeType::VhdlProcedure => FstScopeType::VhdlProcedure,
+        ScopeType::VhdlFunction => FstScopeType::VhdlFunction,
+        ScopeType::VhdlRecord => FstScopeType::VhdlRecord,
+        ScopeType::VhdlProcess => FstScopeType::VhdlProcess,
+        ScopeType::VhdlBlock => FstScopeType::VhdlBlock,
+        ScopeType::VhdlForGenerate => FstScopeType::VhdlForGenerate,
+        ScopeType::VhdlIfGenerate => FstScopeType::VhdlIfGenerate,
+        ScopeType::VhdlGenerate => FstScopeType::VhdlGenerate,
+        ScopeType::VhdlPackage => FstScopeType::VhdlPackage,
+        ScopeType::GhwGeneric => FstScopeType::VhdlGenerate, // ?
+        ScopeType::VhdlArray => FstScopeType::Struct,
         _ => todo!(),
     };
     out.scope(name, component, tpe)
