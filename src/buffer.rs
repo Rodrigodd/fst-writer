@@ -215,6 +215,24 @@ impl SignalBuffer {
         !self.value_changes.is_empty()
     }
 
+    /// Whether a flush would be honored at this point.
+    ///
+    /// The reference drops the request unless the current section already holds more than one time
+    /// step past its first: `fstWriterFlushContext` only sets `flush_context_pending` when
+    /// `tchn_idx > 1` (`fstapi.c:1838`), and otherwise does nothing at all.
+    ///
+    /// [`Self::time_table_index`] is our `tchn_idx`, with one wrinkle: after a flush the reference
+    /// re-records the closing time as the first entry of the new time chain (`fstapi.c:3140`) and
+    /// counts it, which we do not, so its index runs one ahead of ours in every section but the
+    /// first.
+    pub(crate) fn can_flush(&self) -> bool {
+        if self.first_buffer {
+            self.time_table_index > 1
+        } else {
+            self.time_table_index > 0
+        }
+    }
+
     /// Return true if no [`time_change`] was issue.
     pub(crate) fn is_initial_time(&self) -> bool {
         self.time_table.is_empty() && self.first_buffer

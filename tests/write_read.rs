@@ -113,6 +113,9 @@ fn write_read_no_time_change() {
 }
 
 /// Calling `finish` right after a `flush` must not write out a second, redundant section.
+///
+/// The history has to reach three time steps before the flush, or the flush is held back outright
+/// (`SignalBuffer::can_flush`, mirroring `fstapi.c:1838`) and there is nothing to test.
 #[test]
 fn write_read_flush_then_finish() {
     let filename = "tests/flush_then_finish.fst";
@@ -138,6 +141,10 @@ fn write_read_flush_then_finish() {
     writer.signal_change(a, b"0").unwrap();
     writer.time_change(1).unwrap();
     writer.signal_change(a, b"1").unwrap();
+    writer.time_change(2).unwrap();
+    writer.signal_change(a, b"0").unwrap();
+    writer.time_change(3).unwrap();
+    writer.signal_change(a, b"1").unwrap();
     writer.flush().unwrap();
     // no more value changes, and flushing again should be a no-op
     writer.flush().unwrap();
@@ -145,12 +152,12 @@ fn write_read_flush_then_finish() {
 
     //// read
     let mut wave = wellen::simple::read(filename).unwrap();
-    assert_eq!(wave.time_table(), [0, 1]);
+    assert_eq!(wave.time_table(), [0, 1, 2, 3]);
     let a_ref = SignalRef::from_index(0).unwrap();
     wave.load_signals(&[a_ref]);
     assert_eq!(
         signal_values_to_string(wave.get_signal(a_ref).unwrap(), wave.time_table()),
-        "(0: 0), (1: 1)"
+        "(0: 0), (1: 1), (2: 0), (3: 1)"
     );
 }
 
@@ -505,6 +512,11 @@ fn write_read_repeated_value_after_flush() {
         .unwrap();
 
     let mut writer = writer.finish().unwrap();
+    // three time steps first, so the flush below is not held back by `SignalBuffer::can_flush`
+    writer.time_change(10).unwrap();
+    writer.signal_change(a, b"1").unwrap();
+    writer.time_change(20).unwrap();
+    writer.signal_change(a, b"0").unwrap();
     writer.time_change(145).unwrap();
     writer.signal_change(a, b"1").unwrap();
     writer.flush().unwrap();
@@ -517,7 +529,7 @@ fn write_read_repeated_value_after_flush() {
     let wave = wellen::simple::read(filename).unwrap();
     assert_eq!(
         wave.time_table(),
-        [145, 290],
+        [10, 20, 145, 290],
         "the second time step survives"
     );
 
@@ -531,7 +543,87 @@ fn write_read_repeated_value_after_flush() {
             changes.push((time, String::from_utf8_lossy(value).to_string()))
         })
         .unwrap();
-    assert_eq!(changes, [(145, "1".to_string()), (290, "1".to_string())]);
+    assert_eq!(
+        changes,
+        [
+            (10, "1".to_string()),
+            (20, "0".to_string()),
+            (145, "1".to_string()),
+            (290, "1".to_string())
+        ]
+    );
+}
+
+/// A flush is held back until the section holds more than one time step past its first, mirroring
+/// `tchn_idx > 1` in `fstWriterFlushContext` (`fstapi.c:1838`), where a request below that is
+/// dropped outright rather than deferred.
+///
+/// Cutting the section anyway strands whatever follows: the time step at 30 lands in a section that
+/// never receives a value change, and such a section is not written out (`fstapi.c:1259`), so the
+/// time step disappears with it and the time table comes back as `[10, 20]`.
+#[test]
+fn write_read_flush_below_time_step_gate() {
+    let filename = "tests/flush_below_time_step_gate.fst";
+    let reference_filename = "tests/flush_below_time_step_gate_fstapi.fst";
+    let info = FstInfo {
+        start_time: 0,
+        timescale_exponent: -9,
+        version: "test 0.2.3".to_string(),
+        date: "2034-10-10".to_string(),
+        file_type: FstFileType::Verilog,
+    };
+    let mut writer = open_fst(filename, &info).unwrap();
+    let a = writer
+        .var(
+            "a",
+            FstSignalType::bit_vec(8),
+            FstVarType::Reg,
+            FstVarDirection::Output,
+            None,
+        )
+        .unwrap();
+    let mut writer = writer.finish().unwrap();
+    // only two time steps when the flush comes in, so it must not cut the section
+    writer.time_change(10).unwrap();
+    writer.signal_change(a, b"00000001").unwrap();
+    writer.time_change(20).unwrap();
+    writer.signal_change(a, b"00000010").unwrap();
+    writer.flush().unwrap();
+    // no value change follows, so a section cut above would take this time step down with it
+    writer.time_change(30).unwrap();
+    writer.finish().unwrap();
+
+    //// the same history through the reference writer
+    let mut reference = fstapi::Writer::create(reference_filename, true)
+        .unwrap()
+        .timescale_from_str("1ns")
+        .unwrap();
+    let a = reference
+        .create_var(
+            fstapi::var_type::VCD_REG,
+            fstapi::var_dir::OUTPUT,
+            8,
+            "a",
+            None,
+        )
+        .unwrap();
+    reference.emit_time_change(10).unwrap();
+    reference.emit_value_change(a, b"00000001").unwrap();
+    reference.emit_time_change(20).unwrap();
+    reference.emit_value_change(a, b"00000010").unwrap();
+    reference.flush();
+    reference.emit_time_change(30).unwrap();
+    drop(reference);
+
+    //// read
+    let wave = wellen::simple::read(filename).unwrap();
+    assert_eq!(wave.time_table(), [10, 20, 30]);
+    let reference_wave = wellen::simple::read(reference_filename).unwrap();
+    assert_eq!(
+        wave.time_table(),
+        reference_wave.time_table(),
+        "the reference drops the flush request here, so nothing may be lost"
+    );
 }
 
 #[test]
@@ -591,7 +683,8 @@ fn write_read_simple() {
     writer.signal_change(a, b"0").unwrap();
     writer.signal_change(b, b"101010XX10101010").unwrap();
 
-    // flush the buffer, creating a new value change section
+    // held back by `SignalBuffer::can_flush`: the section has two time steps so far, one short of
+    // what the reference acts on (`fstapi.c:1838`)
     writer.flush().unwrap();
 
     writer.time_change(7).unwrap();
