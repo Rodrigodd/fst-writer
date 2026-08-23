@@ -626,6 +626,80 @@ fn write_read_flush_below_time_step_gate() {
     );
 }
 
+/// A `time_change` that does not advance the clock is still a time step. The reference never
+/// compares the new time to `curtime` (`fstWriterEmitTimeChange`, `fstapi.c:3143-3148`): it writes
+/// the zero delta and advances `tchn_idx`. Collapsing it left our time table an entry short, and
+/// left `tchn_idx` behind, so a flush the reference honours was held back here — after which the
+/// trailing time step at 92449 survived in our file and not in the reference's.
+///
+/// This is the history the `fstapi_diff` fuzz target reduced it to.
+#[test]
+fn write_read_time_change_without_progress() {
+    let filename = "tests/time_change_without_progress.fst";
+    let reference_filename = "tests/time_change_without_progress_fstapi.fst";
+    let value = f64::from_bits(3315782124548).to_le_bytes();
+    let info = FstInfo {
+        start_time: 0,
+        timescale_exponent: -9,
+        version: "test 0.2.3".to_string(),
+        date: "2034-10-10".to_string(),
+        file_type: FstFileType::Verilog,
+    };
+    let mut writer = open_fst(filename, &info).unwrap();
+    let r = writer
+        .var(
+            "r",
+            FstSignalType::real(),
+            FstVarType::Real,
+            FstVarDirection::Output,
+            None,
+        )
+        .unwrap();
+    let mut writer = writer.finish().unwrap();
+    writer.time_change(0).unwrap();
+    writer.time_change(37632).unwrap();
+    writer.signal_change(r, &value).unwrap();
+    // does not advance the clock, but still counts as a step
+    writer.time_change(37632).unwrap();
+    writer.flush().unwrap();
+    writer.time_change(92449).unwrap();
+    writer.finish().unwrap();
+
+    //// the same history through the reference writer
+    let mut reference = fstapi::Writer::create(reference_filename, true)
+        .unwrap()
+        .timescale_from_str("1ns")
+        .unwrap();
+    let r = reference
+        .create_var(
+            fstapi::var_type::VCD_REAL,
+            fstapi::var_dir::OUTPUT,
+            8,
+            "r",
+            None,
+        )
+        .unwrap();
+    reference.emit_time_change(0).unwrap();
+    reference.emit_time_change(37632).unwrap();
+    reference.emit_value_change(r, &value).unwrap();
+    reference.emit_time_change(37632).unwrap();
+    reference.flush();
+    reference.emit_time_change(92449).unwrap();
+    drop(reference);
+
+    //// read
+    let wave = wellen::simple::read(filename).unwrap();
+    // 37632 twice, and the flush is honoured, so the trailing 92449 goes down with the section
+    // that never receives a value change
+    assert_eq!(wave.time_table(), [0, 37632, 37632]);
+    let reference_wave = wellen::simple::read(reference_filename).unwrap();
+    assert_eq!(
+        wave.time_table(),
+        reference_wave.time_table(),
+        "the repeated time stamp has to be recorded, exactly as the reference records it"
+    );
+}
+
 #[test]
 fn write_read_simple() {
     let filename = "tests/simple.fst";

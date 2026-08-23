@@ -85,8 +85,8 @@ fn parse(path: &Path) -> Result<Parsed, ReaderError> {
 
     // The two writers cut sections at different points: the reference only queues a flush
     // (`fstWriterFlushContext`, fstapi.c:1835) and acts on it at the next time change, where it
-    // re-records the current time as the first entry of the new section. So its concatenated time
-    // table repeats a time stamp that we store once.
+    // re-records the closing time as the first entry of the new section. So its concatenated time
+    // table can repeat a time stamp that we store once.
     let mut time_table = reader.get_time_table().unwrap_or_default().to_vec();
     time_table.dedup();
 
