@@ -168,6 +168,60 @@ fn fstapi_diff_no_value_changes() {
     }
 }
 
+/// A real valued signal starts out as NaN, not as `x`. The reference seeds the eight bytes of its
+/// current value with `strtod("NaN", NULL)` ("initialize doubles to NaN rather than x",
+/// `fstWriterCreateVar`, `fstapi.c:2605-2611`), where every other signal gets `x`. Filling those
+/// bytes with `x` instead makes the value read back as 2.068428470140581e272.
+///
+/// Nothing is written to the signal here, so the value that reaches the file is purely the
+/// initializer, cloned into a mocked time zero step on close (`fstapi.c:1870-1883`).
+#[test]
+fn fstapi_diff_real_initial_value() {
+    let fstapi_file = "tests/real_initial_value_fstapi.fst";
+    let mut writer = fstapi::Writer::create(fstapi_file, true)
+        .unwrap()
+        .timescale_from_str("1ns")
+        .unwrap();
+    writer
+        .create_var(
+            fstapi::var_type::VCD_REAL,
+            fstapi::var_dir::OUTPUT,
+            8,
+            "r",
+            None,
+        )
+        .unwrap();
+    drop(writer);
+
+    let our_file = "tests/real_initial_value.fst";
+    let info = FstInfo {
+        start_time: 0,
+        timescale_exponent: -9,
+        version: "test 0.2.3".to_string(),
+        date: "2034-10-10".to_string(),
+        file_type: FstFileType::Verilog,
+    };
+    let mut writer = open_fst(our_file, &info).unwrap();
+    writer
+        .var(
+            "r",
+            FstSignalType::real(),
+            FstVarType::Real,
+            FstVarDirection::Output,
+            None,
+        )
+        .unwrap();
+    writer.finish().unwrap().finish().unwrap();
+
+    let (_, _, changes) = read_with_fstapi(our_file);
+    assert_eq!(
+        changes,
+        [(0, "nan".to_string())],
+        "an untouched real reads back as NaN, not as eight `x` bytes"
+    );
+    assert_eq!(read_with_fstapi(our_file), read_with_fstapi(fstapi_file));
+}
+
 /// One call of the writer API, so the same history can be replayed into both writers.
 enum Step<'a> {
     Time(u64),
