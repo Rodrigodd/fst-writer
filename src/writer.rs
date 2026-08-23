@@ -128,6 +128,12 @@ impl<W: std::io::Write + std::io::Seek> FstBodyWriter<W> {
             // stays open instead, so later value changes join it (`fstapi.c:1259`)
             return Ok(());
         }
+        if !self.buffer.can_flush() {
+            // too early in the section for the reference to act on a flush (`fstapi.c:1838`).
+            // Cutting here anyway would strand the time steps that follow: they would land in a
+            // section that may never receive a value change, and such a section is dropped.
+            return Ok(());
+        }
         self.buffer.flush(&mut self.out)?;
         self.finish_info.num_value_change_sections += 1;
         Ok(())

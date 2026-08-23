@@ -270,7 +270,9 @@ fuzz_target!(|waveform: Waveform| {
     // the first time change a flush is always a no-op -- values written then only go into the
     // frame, never into a section -- so those values still go through.
     let mut flushed_without_time = false;
-    // Whether a value change is waiting to be written out. A flush with nothing pending corrupts
+    // Whether a value change is waiting to be written out. Values written before the first time
+    // change do not count: the reference puts those in the frame alone (`fstapi.c:2932-2935`), so
+    // its pending buffer is still empty as far as a flush is concerned. A flush with nothing pending corrupts
     // the reference's own output: `fstWriterFlushContext` queues it (fstapi.c:1838), then
     // `fstWriterFlushContextPrivate` returns early on `vchg_siz <= 1` (fstapi.c:1259) so no new
     // section starts, but `fstWriterEmitTimeChange` still appends `curtime` to the *current* time
@@ -279,12 +281,6 @@ fuzz_target!(|waveform: Waveform| {
     // its own header still says the file ends at 40. There is nothing to compare against there, so
     // the flush is skipped instead.
     let mut pending_values = false;
-    // Time steps recorded since the current section began. The reference ignores a flush until it
-    // has more than one of them (`tchn_idx > 1`, fstapi.c:1838), whereas our `flush` always cuts
-    // the section — and a section holding no value change is dropped (fstapi.c:1259), so the time
-    // steps after our cut are lost while the reference, never having cut, keeps them. That is an
-    // open divergence in its own right; the flush is held back here so the target can get past it.
-    let mut steps_since_section = 0usize;
 
     for op in &waveform.ops {
         match *op {
@@ -293,9 +289,6 @@ fuzz_target!(|waveform: Waveform| {
                 saw_time_change = true;
                 if delta > 0 {
                     flushed_without_time = false;
-                }
-                if delta > 0 || steps_since_section == 0 {
-                    steps_since_section += 1;
                 }
                 reference.emit_time_change(time).unwrap();
                 ours.time_change(time).unwrap();
@@ -314,16 +307,15 @@ fuzz_target!(|waveform: Waveform| {
                     .emit_value_change(reference_handle, &value)
                     .unwrap();
                 ours.signal_change(our_handle, &value).unwrap();
-                pending_values = true;
+                pending_values |= saw_time_change;
             }
             Op::Flush => {
-                if !pending_values || steps_since_section < 3 {
+                if !pending_values {
                     continue;
                 }
                 reference.flush();
                 ours.flush().unwrap();
                 pending_values = false;
-                steps_since_section = 0;
                 flushed_without_time = saw_time_change;
             }
         }
