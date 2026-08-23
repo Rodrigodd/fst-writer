@@ -36,6 +36,8 @@ pub(crate) struct SignalBuffer {
     signal_change_emmited: bool,
     /// start time of the first value change section
     first_time: u64,
+    /// is a flush waiting to be acted on by the next time change?
+    flush_pending: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -92,6 +94,7 @@ impl SignalBuffer {
             first_buffer: true,
             signal_change_emmited: false,
             first_time: 0,
+            flush_pending: false,
         })
     }
 
@@ -175,9 +178,13 @@ impl SignalBuffer {
             self.values[range].copy_from_slice(value);
             self.signal_change_emmited = true;
         } else {
-            if self.time_table.is_empty() {
-                todo!("Currently we only support flushing right before a new time step.")
-            }
+            // A section always holds at least one time step here: the initial time is handled
+            // above, and [`Self::flush`] opens the next section with the time the previous one
+            // closed at.
+            debug_assert!(
+                !self.time_table.is_empty(),
+                "no time step to attach the value to"
+            );
 
             // Duplicate suppression, disabled: the reference only removes duplicate value
             // changes under `FST_REMOVE_DUPLICATE_VC` (`fstapi.c:2868-2924`), which is not defined
@@ -229,16 +236,32 @@ impl SignalBuffer {
     /// step past its first: `fstWriterFlushContext` only sets `flush_context_pending` when
     /// `tchn_idx > 1` (`fstapi.c:1838`), and otherwise does nothing at all.
     ///
-    /// [`Self::time_table_index`] is our `tchn_idx` — both count a time change that does not
-    /// advance the clock — with one wrinkle: after a flush the reference re-records the closing
-    /// time as the first entry of the new time chain (`fstapi.c:3140`) and counts it, which we do
-    /// not, so its index runs one ahead of ours in every section but the first.
+    /// [`Self::time_table_index`] is our `tchn_idx`: both count a time change that does not
+    /// advance the clock, and both start a section that follows a flush with the time the previous
+    /// one closed at.
     pub(crate) fn can_flush(&self) -> bool {
-        if self.first_buffer {
-            self.time_table_index > 1
-        } else {
-            self.time_table_index > 0
+        self.time_table_index > 1
+    }
+
+    /// Queues a flush for the next [`Self::time_change`] to act on.
+    ///
+    /// The reference does not flush when asked either: `fstWriterFlushContext` only sets
+    /// `flush_context_pending`, and only once the current section holds more than one time step
+    /// past its first, dropping the request outright below that (`fstapi.c:1835-1842`).
+    pub(crate) fn request_flush(&mut self) {
+        if self.can_flush() {
+            self.flush_pending = true;
         }
+    }
+
+    /// Whether a queued flush is to be acted on now. The request is cleared either way.
+    ///
+    /// A request that finds nothing to write is dropped, as in the reference — but the reference
+    /// then goes on to seed the new time chain regardless (`fstapi.c:3135-3140`), which corrupts
+    /// every later time stamp of the section it did not close. We deliberately do not follow it
+    /// there, see `docs/fstapi-flush-time-corruption.md`.
+    pub(crate) fn take_pending_flush(&mut self) -> bool {
+        std::mem::take(&mut self.flush_pending) && self.has_value_changes()
     }
 
     /// Return true if no [`time_change`] was issue.
@@ -302,6 +325,11 @@ impl SignalBuffer {
         }
         self.start_time = self.end_time;
         self.time_table.clear();
+        // The next section opens with the time this one closed at, which is what the reference
+        // records when it acts on a queued flush (`fstapi.c:3140`). It keeps a value change that
+        // arrives before the next time change attachable, and keeps our time table identical to
+        // the reference's across the boundary.
+        write_time_chain_update(&mut self.time_table, 0, self.end_time)?;
         self.write_buf.clear();
         self.value_changes.clear();
         self.first_buffer = false;
