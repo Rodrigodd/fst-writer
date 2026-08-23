@@ -38,8 +38,8 @@ Two things the target deliberately does not generate, because they are known to 
 that would drown out everything else. Both are documented in `docs/session-handoff.md`:
 
 - **Variable length signals** (`FstSignalType::bit_vec(0)`), which `fst-writer` cannot encode.
-- **Flushes with nothing pending, or before the section holds more than one time step**, where the
-  reference corrupts its own output or ignores the flush.
+- **Flushes with nothing pending**, where the reference corrupts its own time table rather than
+  simply doing nothing.
 
 ## Running many instances in parallel
 

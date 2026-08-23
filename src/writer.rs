@@ -114,6 +114,13 @@ pub struct FstBodyWriter<W: std::io::Write + std::io::Seek> {
 
 impl<W: std::io::Write + std::io::Seek> FstBodyWriter<W> {
     pub fn time_change(&mut self, time: u64) -> Result<()> {
+        // A queued flush is acted on here rather than where it was requested, as in the reference
+        // (`fstWriterEmitTimeChange`, `fstapi.c:3135-3140`). The section is cut before the new time
+        // step is recorded, so the new step opens the next section.
+        if self.buffer.take_pending_flush() {
+            self.buffer.flush(&mut self.out)?;
+            self.finish_info.num_value_change_sections += 1;
+        }
         self.buffer.time_change(time)
     }
 
@@ -121,21 +128,15 @@ impl<W: std::io::Write + std::io::Seek> FstBodyWriter<W> {
         self.buffer.signal_change(signal_id, value)
     }
 
-    /// flushes all value change data to disk
+    /// Queues a flush of the value change data collected so far.
+    ///
+    /// The section is written out by the next [`Self::time_change`], not here, which is what the
+    /// reference does (`fstWriterFlushContext`, `fstapi.c:1835-1842`). A request made before the
+    /// current section holds more than one time step is dropped, and so is one that turns out to
+    /// have nothing to write: the reference never emits a section without a value change
+    /// (`fstapi.c:1259`).
     pub fn flush(&mut self) -> Result<()> {
-        if !self.buffer.has_value_changes() {
-            // the reference never writes out a section without any value change; the section
-            // stays open instead, so later value changes join it (`fstapi.c:1259`)
-            return Ok(());
-        }
-        if !self.buffer.can_flush() {
-            // too early in the section for the reference to act on a flush (`fstapi.c:1838`).
-            // Cutting here anyway would strand the time steps that follow: they would land in a
-            // section that may never receive a value change, and such a section is dropped.
-            return Ok(());
-        }
-        self.buffer.flush(&mut self.out)?;
-        self.finish_info.num_value_change_sections += 1;
+        self.buffer.request_flush();
         Ok(())
     }
 

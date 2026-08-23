@@ -490,6 +490,9 @@ fn write_read_time_table_equal_compressed_length() {
 /// Suppressing it cost more than the value change: the section left behind holds only a time step,
 /// and a section without any value change is not written out at all (`fstapi.c:1259`), so the second
 /// time step vanished with it and the time table came back as `[145]`.
+///
+/// Also covers the section boundary a queued flush produces, which repeats the time the closed
+/// section ended at.
 #[test]
 fn write_read_repeated_value_after_flush() {
     let filename = "tests/repeated_value_after_flush.fst";
@@ -525,12 +528,45 @@ fn write_read_repeated_value_after_flush() {
     writer.signal_change(a, b"1").unwrap();
     writer.finish().unwrap();
 
+    //// the same history through the reference writer
+    let reference_filename = "tests/repeated_value_after_flush_fstapi.fst";
+    let mut reference = fstapi::Writer::create(reference_filename, true)
+        .unwrap()
+        .timescale_from_str("1ns")
+        .unwrap();
+    let ref_a = reference
+        .create_var(
+            fstapi::var_type::VCD_REG,
+            fstapi::var_dir::OUTPUT,
+            1,
+            "a",
+            None,
+        )
+        .unwrap();
+    for (time, value) in [(10u64, b"1"), (20, b"0"), (145, b"1")] {
+        reference.emit_time_change(time).unwrap();
+        reference.emit_value_change(ref_a, value).unwrap();
+    }
+    reference.flush();
+    reference.emit_time_change(290).unwrap();
+    reference.emit_value_change(ref_a, b"1").unwrap();
+    drop(reference);
+
     //// read
     let wave = wellen::simple::read(filename).unwrap();
+    // The flush is acted on at the next time change, which opens the new section with the time the
+    // old one closed at, so 145 goes into the time table twice. `wellen` collapses the repeat on
+    // read, so the duplicate itself is only pinned by the comparison against the reference below.
     assert_eq!(
         wave.time_table(),
         [10, 20, 145, 290],
         "the second time step survives"
+    );
+    let reference_wave = wellen::simple::read(reference_filename).unwrap();
+    assert_eq!(
+        wave.time_table(),
+        reference_wave.time_table(),
+        "the section boundary has to fall exactly where the reference puts it"
     );
 
     // `wellen` collapses a value change that repeats the value a signal already holds, so the
@@ -689,15 +725,98 @@ fn write_read_time_change_without_progress() {
 
     //// read
     let wave = wellen::simple::read(filename).unwrap();
-    // 37632 twice, and the flush is honoured, so the trailing 92449 goes down with the section
-    // that never receives a value change
-    assert_eq!(wave.time_table(), [0, 37632, 37632]);
+    // 37632 goes into the time table twice, and the flush is honoured, so the trailing 92449 goes
+    // down with the section that never receives a value change. `wellen` collapses the repeated
+    // time stamp on read, so the comparison against the reference below is what pins it.
+    assert_eq!(wave.time_table(), [0, 37632]);
     let reference_wave = wellen::simple::read(reference_filename).unwrap();
     assert_eq!(
         wave.time_table(),
         reference_wave.time_table(),
         "the repeated time stamp has to be recorded, exactly as the reference records it"
     );
+}
+
+/// A value change may follow a `flush` with no time change in between. It used to reach a
+/// `todo!()`, because the flush cut the section immediately and left no time step for the value to
+/// attach to. Now the flush is only queued, so the value joins the still open section and the cut
+/// happens at the next time change — or, as here, never.
+#[test]
+fn write_read_value_after_flush() {
+    let filename = "tests/value_after_flush.fst";
+    let reference_filename = "tests/value_after_flush_fstapi.fst";
+    let info = FstInfo {
+        start_time: 0,
+        timescale_exponent: -9,
+        version: "test 0.2.3".to_string(),
+        date: "2034-10-10".to_string(),
+        file_type: FstFileType::Verilog,
+    };
+    let mut writer = open_fst(filename, &info).unwrap();
+    let a = writer
+        .var(
+            "a",
+            FstSignalType::bit_vec(8),
+            FstVarType::Reg,
+            FstVarDirection::Output,
+            None,
+        )
+        .unwrap();
+    let mut writer = writer.finish().unwrap();
+    for time in [10u64, 20, 30] {
+        writer.time_change(time).unwrap();
+        writer.signal_change(a, b"00000001").unwrap();
+    }
+    // enough time steps for the reference to queue the flush
+    writer.flush().unwrap();
+    writer.signal_change(a, b"00000010").unwrap();
+    writer.finish().unwrap();
+
+    //// the same history through the reference writer
+    let mut reference = fstapi::Writer::create(reference_filename, true)
+        .unwrap()
+        .timescale_from_str("1ns")
+        .unwrap();
+    let ref_a = reference
+        .create_var(
+            fstapi::var_type::VCD_REG,
+            fstapi::var_dir::OUTPUT,
+            8,
+            "a",
+            None,
+        )
+        .unwrap();
+    for time in [10u64, 20, 30] {
+        reference.emit_time_change(time).unwrap();
+        reference.emit_value_change(ref_a, b"00000001").unwrap();
+    }
+    reference.flush();
+    reference.emit_value_change(ref_a, b"00000010").unwrap();
+    drop(reference);
+
+    //// read
+    let wave = wellen::simple::read(filename).unwrap();
+    assert_eq!(wave.time_table(), [10, 20, 30]);
+    let reference_wave = wellen::simple::read(reference_filename).unwrap();
+    assert_eq!(wave.time_table(), reference_wave.time_table());
+
+    // the value written after the flush belongs to the last time step
+    let read = |f: &str| {
+        let mut reader = fstapi::Reader::open(f).unwrap();
+        reader.set_mask_all();
+        let mut changes = vec![];
+        reader
+            .for_each_block(|time, _handle, value, _var_len| {
+                changes.push((time, String::from_utf8_lossy(value).to_string()))
+            })
+            .unwrap();
+        changes
+    };
+    assert_eq!(
+        *read(filename).last().unwrap(),
+        (30, "00000010".to_string())
+    );
+    assert_eq!(read(filename), read(reference_filename));
 }
 
 #[test]
