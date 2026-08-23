@@ -476,6 +476,64 @@ fn write_read_time_table_equal_compressed_length() {
     );
 }
 
+/// Writing the same value a signal already holds still has to be recorded. The reference only
+/// removes duplicate value changes under `FST_REMOVE_DUPLICATE_VC` (`fstapi.c:2868-2924`), which no
+/// build here defines, so `fstWriterEmitValueChange` always records the write.
+///
+/// Suppressing it cost more than the value change: the section left behind holds only a time step,
+/// and a section without any value change is not written out at all (`fstapi.c:1259`), so the second
+/// time step vanished with it and the time table came back as `[145]`.
+#[test]
+fn write_read_repeated_value_after_flush() {
+    let filename = "tests/repeated_value_after_flush.fst";
+    let info = FstInfo {
+        start_time: 0,
+        timescale_exponent: 0,
+        version: "test 0.2.3".to_string(),
+        date: "2034-10-10".to_string(),
+        file_type: FstFileType::Verilog,
+    };
+    let mut writer = open_fst(filename, &info).unwrap();
+    let a = writer
+        .var(
+            "a",
+            FstSignalType::bit_vec(1),
+            FstVarType::Logic,
+            FstVarDirection::Implicit,
+            None,
+        )
+        .unwrap();
+
+    let mut writer = writer.finish().unwrap();
+    writer.time_change(145).unwrap();
+    writer.signal_change(a, b"1").unwrap();
+    writer.flush().unwrap();
+    // the same value again, in a section of its own
+    writer.time_change(290).unwrap();
+    writer.signal_change(a, b"1").unwrap();
+    writer.finish().unwrap();
+
+    //// read
+    let wave = wellen::simple::read(filename).unwrap();
+    assert_eq!(
+        wave.time_table(),
+        [145, 290],
+        "the second time step survives"
+    );
+
+    // `wellen` collapses a value change that repeats the value a signal already holds, so the
+    // change itself is only visible through the reference reader.
+    let mut reader = fstapi::Reader::open(filename).unwrap();
+    reader.set_mask_all();
+    let mut changes = vec![];
+    reader
+        .for_each_block(|time, _handle, value, _var_len| {
+            changes.push((time, String::from_utf8_lossy(value).to_string()))
+        })
+        .unwrap();
+    assert_eq!(changes, [(145, "1".to_string()), (290, "1".to_string())]);
+}
+
 #[test]
 fn write_read_simple() {
     let filename = "tests/simple.fst";
