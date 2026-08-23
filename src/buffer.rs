@@ -61,16 +61,27 @@ fn gen_signal_info(signals: &[FstSignalType]) -> (Vec<SignalInfo>, usize) {
 
 impl SignalBuffer {
     pub(crate) fn new(signals: &[FstSignalType]) -> Result<Self> {
-        let (signals, values_len) = gen_signal_info(signals);
-        let value_changes = SingleVecLists::new(signals.len());
-        let values = vec![b'x'; values_len].into_boxed_slice();
+        let (infos, values_len) = gen_signal_info(signals);
+        let value_changes = SingleVecLists::new(infos.len());
+        let mut values = vec![b'x'; values_len].into_boxed_slice();
+        // The reference initializes reals to NaN instead of `x` ("initialize doubles to NaN rather
+        // than x", `fstWriterCreateVar`, `fstapi.c:2605-2611`, with the value from
+        // `strtod("NaN", NULL)` at `fstapi.c:1133`). Getting this wrong shows up as a signal whose
+        // value before its first write reads back as 2.068428470140581e272, i.e. eight `x` bytes
+        // reinterpreted as a double.
+        for (info, tpe) in infos.iter().zip(signals) {
+            if tpe.is_real() {
+                let range = info.offset as usize..(info.offset + info.len) as usize;
+                values[range].copy_from_slice(&f64::NAN.to_le_bytes());
+            }
+        }
         let frame = values.clone();
-        let prev_time_table_index = vec![0; signals.len()].into_boxed_slice();
+        let prev_time_table_index = vec![0; infos.len()].into_boxed_slice();
         let time_table = Vec::with_capacity(16);
         Ok(Self {
             start_time: 0,
             end_time: 0,
-            signals,
+            signals: infos,
             prev_time_table_index,
             frame,
             values,
