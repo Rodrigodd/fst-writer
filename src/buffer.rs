@@ -8,12 +8,16 @@ use crate::io::{
 };
 use crate::{FstSignalId, FstSignalType, FstWriteError, Result};
 use std::borrow::Cow;
-use std::cmp::Ordering;
 use std::io::{Seek, Write};
 
 /// keeps track of signal values before writing them to disk
 pub(crate) struct SignalBuffer {
+    /// start time step of the current block
+    ///
+    /// Equal to previous block end_time or equal to the timestamp of the first value change in the
+    /// initial block.
     start_time: u64,
+    /// last time step written
     end_time: u64,
     /// constant signal meta-data
     signals: Vec<SignalInfo>,
@@ -23,17 +27,18 @@ pub(crate) struct SignalBuffer {
     frame: Box<[u8]>,
     /// copy of the frame with all value changes applied
     values: Box<[u8]>,
+    /// contains the value changes
     value_changes: SingleVecLists,
-    /// contains the delta encoded and compressed timetable
+    /// contains the delta encoded and compressed time table
     time_table: Vec<u8>,
-    /// the current number of time steps in [`Self::time_table`].
+    /// the index of the last time step written in [`Self::time_table`].
     time_table_index: u32,
     /// keep a vec allocation around for encoding signals
     write_buf: Vec<u8>,
     /// is this the first buffer for the file that we are writing?
     first_buffer: bool,
     /// was a value written before the first time change?
-    signal_change_emmited: bool,
+    signal_change_emitted: bool,
     /// start time of the first value change section
     first_time: u64,
     /// is a flush waiting to be acted on by the next time change?
@@ -65,18 +70,16 @@ impl SignalBuffer {
     pub(crate) fn new(signals: &[FstSignalType]) -> Result<Self> {
         let (infos, values_len) = gen_signal_info(signals);
         let value_changes = SingleVecLists::new(infos.len());
+
         let mut values = vec![b'x'; values_len].into_boxed_slice();
-        // The reference initializes reals to NaN instead of `x` ("initialize doubles to NaN rather
-        // than x", `fstWriterCreateVar`, `fstapi.c:2605-2611`, with the value from
-        // `strtod("NaN", NULL)` at `fstapi.c:1133`). Getting this wrong shows up as a signal whose
-        // value before its first write reads back as 2.068428470140581e272, i.e. eight `x` bytes
-        // reinterpreted as a double.
+        // Initialize reals as NaN.
         for (info, tpe) in infos.iter().zip(signals) {
             if tpe.is_real() {
                 let range = info.offset as usize..(info.offset + info.len) as usize;
                 values[range].copy_from_slice(&f64::NAN.to_le_bytes());
             }
         }
+
         let frame = values.clone();
         let prev_time_table_index = vec![0; infos.len()].into_boxed_slice();
         let time_table = Vec::with_capacity(16);
@@ -92,7 +95,7 @@ impl SignalBuffer {
             time_table_index: 0,
             write_buf: vec![],
             first_buffer: true,
-            signal_change_emmited: false,
+            signal_change_emitted: false,
             first_time: 0,
             flush_pending: false,
         })
@@ -100,12 +103,8 @@ impl SignalBuffer {
 
     pub(crate) fn time_change(&mut self, new_time: u64) -> Result<()> {
         if self.is_initial_time() {
-            // `firsttime = vc_emitted ? 0 : tim` (`fstWriterEmitTimeChange`, `fstapi.c:3124`).
-            // The values written so far stay in the frame only, just like in the reference
-            // (`fstapi.c:2932-2935`). Readers skip that frame when the first time step is at the
-            // start time of the section (`fstapi.c:5066`), so those values are lost — the
-            // reference loses them in exactly the same way.
-            self.start_time = if self.signal_change_emmited {
+            // If any signal change was already emitted, start time at 0.
+            self.start_time = if self.signal_change_emitted {
                 0
             } else {
                 new_time
@@ -115,28 +114,19 @@ impl SignalBuffer {
             return Ok(());
         }
 
-        match new_time.cmp(&self.end_time) {
-            Ordering::Less => Err(FstWriteError::TimeDecrease(self.end_time, new_time)),
-            // A time change that does not advance the clock is still a time step: the reference
-            // writes its zero delta and advances `tchn_idx` like any other, since
-            // `fstWriterEmitTimeChange` never compares the new time to `curtime`
-            // (`fstapi.c:3143-3148`). Collapsing it here left our time table one entry short and,
-            // worse, left `tchn_idx` behind, which is what decides whether a flush is honoured
-            // (`fstapi.c:1838`, see [`Self::can_flush`]).
-            //
-            // the first step of a section is not captured in the time table index, but instead in
-            // the start_time
-            Ordering::Equal | Ordering::Greater if self.time_table.is_empty() => {
-                self.start_time_step(new_time)
-            }
-            Ordering::Equal | Ordering::Greater => {
-                self.time_table_index += 1;
-                // write timetable in compressed format
-                write_time_chain_update(&mut self.time_table, self.end_time, new_time)?;
-                self.end_time = new_time;
-                Ok(())
-            }
+        if new_time < self.end_time {
+            return Err(FstWriteError::TimeDecrease(self.end_time, new_time));
         }
+
+        if self.time_table.is_empty() {
+            return self.start_time_step(new_time);
+        }
+
+        self.time_table_index += 1;
+        // write time table in compressed format
+        write_time_chain_update(&mut self.time_table, self.end_time, new_time)?;
+        self.end_time = new_time;
+        Ok(())
     }
 
     /// Starts the first time step of a value change section: the values collected so far become
@@ -144,7 +134,6 @@ impl SignalBuffer {
     fn start_time_step(&mut self, new_time: u64) -> Result<()> {
         debug_assert!(self.time_table.is_empty());
         debug_assert!(self.start_time <= new_time);
-        // at the end of the first step, we copy values over into the frame
         self.frame = self.values.clone();
         write_time_chain_update(&mut self.time_table, 0, new_time)?;
         self.end_time = new_time;
@@ -176,7 +165,7 @@ impl SignalBuffer {
         debug_assert_eq!(value.len(), len);
         if self.is_initial_time() {
             self.values[range].copy_from_slice(value);
-            self.signal_change_emmited = true;
+            self.signal_change_emitted = true;
         } else {
             // A section always holds at least one time step here: the initial time is handled
             // above, and [`Self::flush`] opens the next section with the time the previous one
@@ -185,18 +174,7 @@ impl SignalBuffer {
                 !self.time_table.is_empty(),
                 "no time step to attach the value to"
             );
-
-            // Duplicate suppression, disabled: the reference only removes duplicate value
-            // changes under `FST_REMOVE_DUPLICATE_VC` (`fstapi.c:2868-2924`), which is not defined
-            // in any build we test against, so suppressing here drops value changes that the
-            // reference keeps. Combined with skipping sections that hold no value change
-            // (`fstapi.c:1259`) it also loses the time steps of such a section. Kept for when we
-            // want glitch removal back.
-            // if &self.values[range.clone()] == value {
-            //     return Ok(());
-            // }
             self.values[range].copy_from_slice(value);
-            // write down value change
             self.append_value_change(signal_id.to_array_index())?;
         }
         Ok(())
@@ -222,49 +200,30 @@ impl SignalBuffer {
         Ok(())
     }
 
-    /// Returns true if the current section holds at least one value change. The reference never
-    /// finalizes a section without one: `fstWriterFlushContextPrivate` returns early on
-    /// `vchg_siz <= 1` (`fstapi.c:1259`), leaving the section open and its header tagged
-    /// `FST_BL_SKIP`, which readers treat like EOF (`fstapi.c:4917`).
+    /// Returns true if the current section holds at least one value change.
     pub(crate) fn has_value_changes(&self) -> bool {
         !self.value_changes.is_empty()
     }
 
-    /// Whether a flush would be honored at this point.
-    ///
-    /// The reference drops the request unless the current section already holds more than one time
-    /// step past its first: `fstWriterFlushContext` only sets `flush_context_pending` when
-    /// `tchn_idx > 1` (`fstapi.c:1838`), and otherwise does nothing at all.
-    ///
-    /// [`Self::time_table_index`] is our `tchn_idx`: both count a time change that does not
-    /// advance the clock, and both start a section that follows a flush with the time the previous
-    /// one closed at.
-    pub(crate) fn can_flush(&self) -> bool {
-        self.time_table_index > 1
-    }
-
-    /// Queues a flush for the next [`Self::time_change`] to act on.
-    ///
-    /// The reference does not flush when asked either: `fstWriterFlushContext` only sets
-    /// `flush_context_pending`, and only once the current section holds more than one time step
-    /// past its first, dropping the request outright below that (`fstapi.c:1835-1842`).
+    /// Queues a flush for the next [`Self::time_change`] to act on. If less than 3 time steps has
+    /// been issued for this block, the request is dropped.
     pub(crate) fn request_flush(&mut self) {
-        if self.can_flush() {
-            self.flush_pending = true;
+        // this limit is arbitrary, just matches fstapi
+        if self.time_table_index <= 1 {
+            return;
         }
+
+        self.flush_pending = true;
     }
 
     /// Whether a queued flush is to be acted on now. The request is cleared either way.
     ///
-    /// A request that finds nothing to write is dropped, as in the reference — but the reference
-    /// then goes on to seed the new time chain regardless (`fstapi.c:3135-3140`), which corrupts
-    /// every later time stamp of the section it did not close. We deliberately do not follow it
-    /// there, see `docs/fstapi-flush-time-corruption.md`.
+    /// A request that finds nothing to write is dropped.
     pub(crate) fn take_pending_flush(&mut self) -> bool {
         std::mem::take(&mut self.flush_pending) && self.has_value_changes()
     }
 
-    /// Return true if no [`time_change`] was issue.
+    /// Returns true if the first [`time_change`] has yet to be issued.
     pub(crate) fn is_initial_time(&self) -> bool {
         self.time_table.is_empty() && self.first_buffer
     }
@@ -275,9 +234,7 @@ impl SignalBuffer {
 
     /// Mocks up a single time step at zero, containing the values of all signals.
     ///
-    /// Used when the file is closed without the time ever advancing, where the reference
-    /// "mock[s] up the changes as time zero ones": one time change followed by a clone of every
-    /// handle's value (`fstWriterClose`, `fstapi.c:1870-1883`).
+    /// Used when the file is closed without the time ever advancing.
     pub(crate) fn mock_initial_time_step(&mut self) -> Result<()> {
         debug_assert!(self.is_initial_time(), "the time already advanced");
         self.time_change(0)?;
@@ -285,6 +242,10 @@ impl SignalBuffer {
     }
 
     /// Write down the current value of every signal as a value change in the current time step.
+    ///
+    /// Avoid losing signal changes made before the first time change. They are still stored in
+    /// [`Self::frame`], but the reader, in certain cases, do not read it, and only considers the
+    /// recorded value changes.
     fn clone_all_values(&mut self) -> Result<()> {
         for signal_idx in 0..self.signals.len() {
             self.append_value_change(signal_idx)?;
@@ -292,7 +253,7 @@ impl SignalBuffer {
         Ok(())
     }
 
-    /// Start time of the first value change section (`firsttime` in `fstapi.c`).
+    /// Start time of the first value change section.
     pub(crate) fn first_time(&self) -> u64 {
         self.first_time
     }
@@ -325,10 +286,7 @@ impl SignalBuffer {
         }
         self.start_time = self.end_time;
         self.time_table.clear();
-        // The next section opens with the time this one closed at, which is what the reference
-        // records when it acts on a queued flush (`fstapi.c:3140`). It keeps a value change that
-        // arrives before the next time change attachable, and keeps our time table identical to
-        // the reference's across the boundary.
+        // The next section opens with the time this one closed at.
         write_time_chain_update(&mut self.time_table, 0, self.end_time)?;
         self.write_buf.clear();
         self.value_changes.clear();

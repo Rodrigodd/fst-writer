@@ -69,7 +69,7 @@ impl FstSignalType {
         }
     }
 
-    /// Whether this is a real valued signal. Those start out as NaN rather than `x`.
+    /// True if this is a signal of type [`SignalType::Real`].
     #[inline]
     pub(crate) fn is_real(&self) -> bool {
         matches!(self.0, SignalType::Real)

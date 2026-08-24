@@ -56,9 +56,6 @@ fn fstapi_read_first_time_change_not_zero() {
 
 /// Writes the same signal history with the reference implementation and with `fst-writer` and
 /// compares what the reference reader makes of both files.
-///
-/// Note that the `fstapi` writer needs to be able to create temporary files with `tmpfile()`,
-/// i.e. it needs write access to `/tmp`, otherwise it fails with `ContextCreate`.
 #[test]
 fn fstapi_diff_first_time_change() {
     let steps: [(u64, &[u8]); 3] = [(10, b"00000001"), (20, b"00000000"), (30, b"00001111")];
