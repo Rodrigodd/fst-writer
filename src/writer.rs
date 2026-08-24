@@ -114,9 +114,7 @@ pub struct FstBodyWriter<W: std::io::Write + std::io::Seek> {
 
 impl<W: std::io::Write + std::io::Seek> FstBodyWriter<W> {
     pub fn time_change(&mut self, time: u64) -> Result<()> {
-        // A queued flush is acted on here rather than where it was requested, as in the reference
-        // (`fstWriterEmitTimeChange`, `fstapi.c:3135-3140`). The section is cut before the new time
-        // step is recorded, so the new step opens the next section.
+        // flush the block if pending
         if self.buffer.take_pending_flush() {
             self.buffer.flush(&mut self.out)?;
             self.finish_info.num_value_change_sections += 1;
@@ -130,11 +128,9 @@ impl<W: std::io::Write + std::io::Seek> FstBodyWriter<W> {
 
     /// Queues a flush of the value change data collected so far.
     ///
-    /// The section is written out by the next [`Self::time_change`], not here, which is what the
-    /// reference does (`fstWriterFlushContext`, `fstapi.c:1835-1842`). A request made before the
-    /// current section holds more than one time step is dropped, and so is one that turns out to
-    /// have nothing to write: the reference never emits a section without a value change
-    /// (`fstapi.c:1259`).
+    /// The section is written out by the next [`Self::time_change`]. A request made before a call
+    /// to signal_change in the current section is dropped. The flush is canceled if no signal
+    /// change was issued since the last flush.
     pub fn flush(&mut self) -> Result<()> {
         self.buffer.request_flush();
         Ok(())
@@ -147,8 +143,6 @@ impl<W: std::io::Write + std::io::Seek> FstBodyWriter<W> {
 
     pub fn finish(mut self) -> Result<()> {
         if self.buffer.is_initial_time() {
-            // "simulation time never advanced so mock up the changes as time zero ones"
-            // (`fstWriterClose`, `fstapi.c:1870-1883`)
             self.buffer.mock_initial_time_step()?;
         }
 

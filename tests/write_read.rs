@@ -892,7 +892,7 @@ fn write_read_simple() {
     //// read
     let mut wave = wellen::simple::read(filename).unwrap();
 
-    // timetable
+    // time table
     assert_eq!(wave.time_table(), [0, 1, 5, 7, 8]);
 
     // hierarchy
