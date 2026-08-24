@@ -29,8 +29,8 @@ struct Args {
     end_time: Option<String>,
 }
 
-// write a value change block when we reach 128 MiB of in memory data
-const FLUSH_AT: usize = 128 * 1024 * 1024;
+// write a value change block when we reach 32 MiB of in memory data
+const FLUSH_AT: usize = 32 * 1024 * 1024;
 
 fn main() {
     let args = Args::parse();
@@ -55,6 +55,11 @@ fn main() {
         if time >= filter_start && time <= filter_end {
             // emit time change
             if prev_time.is_none_or(|prev| prev < time) {
+                // flush buffer right before time change
+                if out.size() >= FLUSH_AT {
+                    out.flush().expect("failed to flush buffer");
+                }
+
                 out.time_change(time).expect("failed time change");
                 prev_time = Some(time);
             }
@@ -78,11 +83,6 @@ fn main() {
                     out.signal_change(fst_id, &bytes)
                         .expect("failed to write value change");
                 }
-            }
-
-            // flush buffer
-            if out.size() >= FLUSH_AT {
-                out.flush().expect("failed to flush buffer");
             }
         }
 
