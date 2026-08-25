@@ -114,12 +114,12 @@ impl SignalBuffer {
             return Ok(());
         }
 
+        // In the first block we enter the conditional above, and subsequent blocks already have a
+        // initial time step in the time table.
+        debug_assert!(!self.time_table.is_empty());
+
         if new_time < self.end_time {
             return Err(FstWriteError::TimeDecrease(self.end_time, new_time));
-        }
-
-        if self.time_table.is_empty() {
-            return self.start_time_step(new_time);
         }
 
         self.time_table_index += 1;

@@ -8,7 +8,7 @@ use fst_writer::{
     open_fst, FstFileType, FstInfo, FstScopeType, FstSignalId, FstSignalType, FstVarDirection,
     FstVarType,
 };
-use fstapi::{scope_type, var_dir, var_type};
+use fstapi::{var_dir, var_type};
 use libfuzzer_sys::fuzz_target;
 use std::io::BufReader;
 use std::path::Path;
@@ -28,12 +28,17 @@ enum VarType {
 
 #[derive(Debug, Arbitrary)]
 enum Item {
-    Scope,
+    Scope {
+        name: String,
+        component: String,
+        tpe: FstScopeType,
+    },
     UpScope,
     /// A new variable. `alias_of` picks an earlier one to alias, and an alias always describes the
     /// same signal as its target, so it takes over the target's type.
     Var {
         tpe: VarType,
+        name: String,
         alias_of: Option<u8>,
     },
 }
@@ -152,6 +157,13 @@ fn value_for(tpe: VarType, bits: u64, four_state: bool) -> Vec<u8> {
     }
 }
 
+fn sanitize(s: &str) -> &str {
+    // Remove any null bytes from the string. This Makes fstapi crate panic.
+    s.split('\0')
+        .next()
+        .expect("split returns at least the full string")
+}
+
 fuzz_target!(|waveform: Waveform| {
     let outdir = tempdir().unwrap();
     let reference_path = outdir.path().join("fstapi.fst");
@@ -177,14 +189,19 @@ fuzz_target!(|waveform: Waveform| {
     let mut vars: Vec<(VarType, fstapi::Handle, FstSignalId)> = vec![];
     let mut depth = 0usize;
 
-    for (i, item) in waveform.hierarchy.iter().enumerate() {
+    for item in waveform.hierarchy.iter() {
         match item {
-            Item::Scope => {
-                let name = format!("m{i}");
+            Item::Scope {
+                name,
+                component,
+                tpe,
+            } => {
+                let name = sanitize(name);
+                let component = sanitize(component);
                 reference
-                    .set_scope(scope_type::VCD_MODULE, &name, "")
+                    .set_scope(*tpe as fstapi::ScopeType, name, component)
                     .unwrap();
-                ours.scope(&name, "", FstScopeType::Module).unwrap();
+                ours.scope(name, component, *tpe).unwrap();
                 depth += 1;
             }
             Item::UpScope => {
@@ -195,7 +212,11 @@ fuzz_target!(|waveform: Waveform| {
                     depth -= 1;
                 }
             }
-            Item::Var { tpe, alias_of } => {
+            Item::Var {
+                name,
+                tpe,
+                alias_of,
+            } => {
                 let target = alias_of
                     .filter(|_| !vars.is_empty())
                     .map(|a| vars[a as usize % vars.len()]);
@@ -206,7 +227,8 @@ fuzz_target!(|waveform: Waveform| {
                     None => (*tpe, None, None),
                 };
 
-                let name = format!("s{i}");
+                let name = sanitize(name);
+
                 let (reference_tpe, our_tpe, our_var_tpe, width) = match tpe {
                     VarType::Real => (
                         var_type::VCD_REAL,
@@ -223,17 +245,11 @@ fuzz_target!(|waveform: Waveform| {
                 };
 
                 let reference_handle = reference
-                    .create_var(
-                        reference_tpe,
-                        var_dir::OUTPUT,
-                        width,
-                        &name,
-                        reference_alias,
-                    )
+                    .create_var(reference_tpe, var_dir::OUTPUT, width, name, reference_alias)
                     .unwrap();
                 let our_handle = ours
                     .var(
-                        &name,
+                        name,
                         our_tpe,
                         our_var_tpe,
                         FstVarDirection::Output,
