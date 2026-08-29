@@ -344,19 +344,6 @@ pub(crate) fn write_multi_bit_signal(
     Ok(())
 }
 
-#[allow(dead_code)]
-#[inline]
-pub(crate) fn write_real_signal(
-    output: &mut impl Write,
-    time_delta: u64,
-    value: f64,
-) -> Result<()> {
-    // write time delta, bit 0 should always be zero, otherwise we are triggering the "rare packed case"
-    write_variant_u64(output, time_delta << 1)?;
-    output.write_all(value.to_le_bytes().as_slice())?;
-    Ok(())
-}
-
 #[inline]
 fn is_digital(values: &[u8]) -> bool {
     values.iter().all(|v| matches!(*v, b'0' | b'1'))
