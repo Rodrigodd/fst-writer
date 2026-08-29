@@ -948,3 +948,46 @@ fn signal_values_to_string(signal: &wellen::Signal, time_table: &[Time]) -> Stri
     out.pop().unwrap();
     out
 }
+
+fn test_info(version: &str) -> FstInfo {
+    FstInfo {
+        start_time: 0,
+        timescale_exponent: 0,
+        version: version.to_string(),
+        date: "2034-10-10".to_string(),
+        file_type: FstFileType::Verilog,
+    }
+}
+
+/// A character that is not one of the nine `std_logic` states is rejected rather than silently
+/// written.
+///
+/// `?` is the interesting one: the format has a code for it, `FST_RCV_Q`, but `fstapi.h` reserves
+/// that code for a future escape mechanism and no reader can decode it as a value.
+#[test]
+fn write_invalid_bit_vector_character() {
+    let filename = "tests/invalid_character.fst";
+    let info = test_info("test 0.2.3");
+    let mut writer = open_fst(filename, &info).unwrap();
+    let a = writer
+        .var(
+            "a",
+            FstSignalType::bit_vec(1),
+            FstVarType::Logic,
+            FstVarDirection::Implicit,
+            None,
+        )
+        .unwrap();
+    let mut writer = writer.finish().unwrap();
+
+    writer.time_change(0).unwrap();
+    for bad in ['q', '?'] {
+        let err = writer
+            .signal_change(a, bad.to_string().as_bytes())
+            .unwrap_err();
+        assert!(
+            matches!(err, FstWriteError::InvalidCharacter(c) if c == bad),
+            "expected {bad:?} to be rejected, got: {err:?}"
+        );
+    }
+}
