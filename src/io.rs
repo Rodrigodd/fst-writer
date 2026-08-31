@@ -357,7 +357,6 @@ fn encode_9_value(value: u8) -> Option<u8> {
         b'w' | b'W' => Some(4),
         b'l' | b'L' => Some(5),
         b'-' => Some(6),
-        b'?' => Some(7),
         _ => None,
     }
 }
