@@ -144,6 +144,7 @@ impl SignalBuffer {
             }
 
             // check to see if there actually was a change
+            #[cfg(feature = "deduplicate")]
             if &self.values[range.clone()] == value {
                 return Ok(());
             }
