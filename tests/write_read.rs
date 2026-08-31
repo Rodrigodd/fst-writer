@@ -136,3 +136,64 @@ fn signal_values_to_string(signal: &wellen::Signal, time_table: &[Time]) -> Stri
     out.pop().unwrap();
     out
 }
+
+/// A real valued signal that was never written reads back as NaN, not as eight `x` bytes.
+#[test]
+fn write_read_real_initial_value() {
+    let filename = "tests/real_initial_value.fst";
+    let info = FstInfo {
+        start_time: 0,
+        timescale_exponent: -9,
+        version: "test 0.2.3".to_string(),
+        date: "2034-10-10".to_string(),
+        file_type: FstFileType::Verilog,
+    };
+    let mut writer = open_fst(filename, &info).unwrap();
+    writer
+        .var(
+            "r",
+            FstSignalType::real(),
+            FstVarType::Real,
+            FstVarDirection::Output,
+            None,
+        )
+        .unwrap();
+    // a second signal, so that the section holds a value change even though `r` is never written
+    let a = writer
+        .var(
+            "a",
+            FstSignalType::bit_vec(1),
+            FstVarType::Logic,
+            FstVarDirection::Implicit,
+            None,
+        )
+        .unwrap();
+    let mut writer = writer.finish().unwrap();
+    // written before the first time change so the section starts at 0 while the first time chain
+    // starts at 10, forcing the reader to read the section `frame`, where `r` is initialized as
+    // NaN.
+    writer.signal_change(a, b"1").unwrap();
+    writer.time_change(10).unwrap();
+    // write another value to ensure the section is not empty and dropped.
+    writer.signal_change(a, b"0").unwrap();
+    writer.finish().unwrap();
+
+    //// read
+    let mut wave = wellen::simple::read(filename).unwrap();
+    // `r` is declared first, so it is signal index 0
+    let r_ref = SignalRef::from_index(0).unwrap();
+    wave.load_signals(&[r_ref]);
+    let (_, value) = wave
+        .get_signal(r_ref)
+        .unwrap()
+        .iter_changes()
+        .next()
+        .expect("the frame has to give `r` an initial value");
+    match value {
+        wellen::SignalValueRef::Real(v) => assert!(
+            v.is_nan(),
+            "an untouched real reads back as NaN, not as eight `x` bytes; got {v:?}"
+        ),
+        other => panic!("expected a real, got {other:?}"),
+    }
+}
