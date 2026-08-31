@@ -252,3 +252,43 @@ fn write_read_real_initial_value() {
         other => panic!("expected a real, got {other:?}"),
     }
 }
+
+/// A character that is not one of the nine `std_logic` states is rejected rather than silently
+/// written.
+///
+/// `?` is the interesting one: the format does have a code for it, but the reference reserves that
+/// code for future expansion and no reader can decode it as a value.
+#[test]
+fn write_invalid_bit_vector_character() {
+    let filename = "tests/invalid_character.fst";
+    let info = FstInfo {
+        start_time: 0,
+        timescale_exponent: 0,
+        version: "test 0.2.3".to_string(),
+        date: "2034-10-10".to_string(),
+        file_type: FstFileType::Verilog,
+    };
+    let mut writer = open_fst(filename, &info).unwrap();
+    let a = writer
+        .var(
+            "a",
+            FstSignalType::bit_vec(1),
+            FstVarType::Logic,
+            FstVarDirection::Implicit,
+            None,
+        )
+        .unwrap();
+    let mut writer = writer.finish().unwrap();
+
+    // a time change that actually opens a time step, so the value is encoded right away
+    writer.time_change(1).unwrap();
+    for bad in ['q', '?'] {
+        let err = writer
+            .signal_change(a, bad.to_string().as_bytes())
+            .unwrap_err();
+        assert!(
+            matches!(err, FstWriteError::InvalidCharacter(c) if c == bad),
+            "expected {bad:?} to be rejected, got: {err:?}"
+        );
+    }
+}
