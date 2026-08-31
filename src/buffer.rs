@@ -134,10 +134,6 @@ impl SignalBuffer {
                 todo!("Currently we only support flushing right before a new time step.")
             }
 
-            // check to see if there actually was a change
-            if &self.values[range.clone()] == value {
-                return Ok(());
-            }
             self.values[range].copy_from_slice(value);
             // write down value change
             let time_table_idx_delta = (self.time_table_index

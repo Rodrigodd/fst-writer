@@ -5,6 +5,7 @@
 // write FST files with fst-writer and read them again with the wellen library
 // (using fst-native as the backend)
 
+use fst_reader::{FstFilter, FstReader, FstSignalValue};
 use fst_writer::*;
 use wellen::{SignalRef, Time};
 
@@ -135,4 +136,65 @@ fn signal_values_to_string(signal: &wellen::Signal, time_table: &[Time]) -> Stri
     out.pop().unwrap();
     out.pop().unwrap();
     out
+}
+
+/// A value change that repeats the value a signal already holds must still be recorded.
+///
+/// `wellen` collapses the repeat again on read, so this decodes the raw value change records
+/// with `fst-reader` instead.
+#[test]
+fn write_read_repeated_value() {
+    let filename = "tests/repeated_value.fst";
+    let info = FstInfo {
+        start_time: 0,
+        timescale_exponent: -9,
+        version: "test 0.2.3".to_string(),
+        date: "2034-10-10".to_string(),
+        file_type: FstFileType::Verilog,
+    };
+    let mut writer = open_fst(filename, &info).unwrap();
+    let a = writer
+        .var(
+            "a",
+            FstSignalType::bit_vec(1),
+            FstVarType::Logic,
+            FstVarDirection::Implicit,
+            None,
+        )
+        .unwrap();
+    let mut writer = writer.finish().unwrap();
+
+    writer.time_change(10).unwrap();
+    writer.signal_change(a, b"1").unwrap();
+    writer.time_change(20).unwrap();
+    writer.signal_change(a, b"1").unwrap(); // the same value again
+    writer.time_change(30).unwrap();
+    writer.signal_change(a, b"0").unwrap();
+    writer.finish().unwrap();
+
+    let file = std::io::BufReader::new(std::fs::File::open(filename).unwrap());
+    let mut reader = FstReader::open(file).unwrap();
+    let mut changes = vec![];
+    reader
+        .read_signals(&FstFilter::all(), |time, _handle, value| {
+            // whatever the section start contributes at time 0 is not what this test is about
+            if time >= 10 {
+                let value = match value {
+                    FstSignalValue::String(value) => String::from_utf8_lossy(value).to_string(),
+                    FstSignalValue::Real(value) => format!("{value:?}"),
+                };
+                changes.push((time, value));
+            }
+            Ok::<(), ()>(())
+        })
+        .unwrap();
+    assert_eq!(
+        changes,
+        [
+            (10, "1".to_string()),
+            (20, "1".to_string()),
+            (30, "0".to_string())
+        ],
+        "the repeated value change has to survive"
+    );
 }
