@@ -192,7 +192,6 @@ fn write_read_time_table_sizes() {
     }
 }
 
-
 /// A real valued signal that was never written reads back as NaN, not as eight `x` bytes.
 #[test]
 fn write_read_real_initial_value() {
