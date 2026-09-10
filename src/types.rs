@@ -69,6 +69,12 @@ impl FstSignalType {
         }
     }
 
+    /// True if this is a signal of type [`SignalType::Real`].
+    #[inline]
+    pub(crate) fn is_real(&self) -> bool {
+        matches!(self.0, SignalType::Real)
+    }
+
     #[inline]
     pub(crate) fn len(&self) -> u32 {
         match self.0 {

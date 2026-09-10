@@ -16,7 +16,7 @@ pub(crate) struct SignalBuffer {
     start_time: u64,
     end_time: u64,
     /// constant signal meta-data
-    signals: Vec<SignalInfo>,
+    signal_info: Vec<SignalInfo>,
     /// time table index of the previous change for each signal
     prev_time_table_index: Box<[u32]>,
     /// values for all signals in the first time step of this block
@@ -56,16 +56,25 @@ fn gen_signal_info(signals: &[FstSignalType]) -> (Vec<SignalInfo>, usize) {
 
 impl SignalBuffer {
     pub(crate) fn new(signals: &[FstSignalType]) -> Result<Self> {
-        let (signals, values_len) = gen_signal_info(signals);
-        let value_changes = SingleVecLists::new(signals.len());
-        let values = vec![b'x'; values_len].into_boxed_slice();
+        let (signal_info, values_len) = gen_signal_info(signals);
+        let value_changes = SingleVecLists::new(signal_info.len());
+
+        let mut values = vec![b'x'; values_len].into_boxed_slice();
+        // Initialize reals as NaN.
+        for (info, tpe) in signal_info.iter().zip(signals) {
+            if tpe.is_real() {
+                let range = info.offset as usize..(info.offset + info.len) as usize;
+                values[range].copy_from_slice(&f64::NAN.to_le_bytes());
+            }
+        }
+
         let frame = values.clone();
-        let prev_time_table_index = vec![0; signals.len()].into_boxed_slice();
+        let prev_time_table_index = vec![0; signal_info.len()].into_boxed_slice();
         let time_table = Vec::with_capacity(16);
         Ok(Self {
             start_time: 0,
             end_time: 0,
-            signals,
+            signal_info,
             prev_time_table_index,
             frame,
             values,
@@ -103,7 +112,7 @@ impl SignalBuffer {
     }
 
     pub(crate) fn signal_change(&mut self, signal_id: FstSignalId, value: &[u8]) -> Result<()> {
-        let info = match self.signals.get(signal_id.to_array_index()) {
+        let info = match self.signal_info.get(signal_id.to_array_index()) {
             Some(info) => info,
             None => return Err(FstWriteError::InvalidSignalId(signal_id)),
         };
@@ -177,7 +186,7 @@ impl SignalBuffer {
             &self.time_table,
             self.num_time_table_entries(),
             |signal_idx: usize| self.value_changes.extract_list(signal_idx, None),
-            self.signals.len(),
+            self.signal_info.len(),
         )?;
 
         // reset data
