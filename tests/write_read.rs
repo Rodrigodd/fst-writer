@@ -136,3 +136,58 @@ fn signal_values_to_string(signal: &wellen::Signal, time_table: &[Time]) -> Stri
     out.pop().unwrap();
     out
 }
+
+/// Regression test for the situation where a compressed time table have the same size as the raw
+/// time table. In those situations the uncompressed version should be written, otherwise the reader
+/// would interpret the compresed time table as raw.
+///
+/// At the time of writing, this happens at step 11. Use a sweep to hopefully make it more stable
+/// across internal changes.
+#[test]
+fn write_read_time_table_sizes() {
+    let filename = "tests/time_table_sizes.fst";
+
+    for steps in 1..=40u64 {
+        let context = format!("{steps} time steps");
+        let info = FstInfo {
+            start_time: 0,
+            timescale_exponent: 0,
+            version: "test 0.2.3".to_string(),
+            date: "2034-10-10".to_string(),
+            file_type: FstFileType::Verilog,
+        };
+        let mut writer = open_fst(filename, &info).unwrap();
+        let a = writer
+            .var(
+                "a",
+                FstSignalType::bit_vec(1),
+                FstVarType::Logic,
+                FstVarDirection::Implicit,
+                None,
+            )
+            .unwrap();
+
+        let mut writer = writer.finish().unwrap();
+
+        let times: Vec<u64> = (0..=steps).collect();
+        for time in &times {
+            writer.time_change(*time).unwrap();
+            // alternating, so the history is the same whether or not repeats are suppressed
+            writer
+                .signal_change(a, if time % 2 == 0 { b"0" } else { b"1" })
+                .unwrap();
+        }
+        writer.finish().unwrap();
+
+        //// read
+        // this is the failure the bug produced: the file cannot be opened at all
+        let wave = wellen::simple::read(filename)
+            .unwrap_or_else(|e| panic!("{context}: the file could not be read back: {e:?}"));
+
+        assert_eq!(
+            wave.time_table(),
+            times.as_slice(),
+            "{context}: wrong time table"
+        );
+    }
+}
